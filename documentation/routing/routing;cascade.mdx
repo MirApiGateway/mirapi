@@ -1,0 +1,290 @@
+---
+title: Multi-target Cascade Routing
+description: Route requests across multiple API endpoints using Race or Priority strategies for maximum resilience.
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+
+Cascade routing lets you define multiple upstream targets for a single request. MirApi will try them in sequence (Priority) or simultaneously (Race), returning the first successful response.
+
+Cascade routes are configured in your dashboard and activated with the `X-Route-Key` header. This approach keeps your request headers clean and allows routes to be updated without changing your code.
+
+## Configure a Route in the Dashboard
+
+Before using cascade routing, create a route in your MirApi dashboard:
+
+1. Open **Routes → Create Route**
+2. Set a name (e.g., `ai-providers`)
+3. Add targets as a comma-separated list of full URLs:
+   ```
+   https://api.openai.com/v1/chat/completions,
+   https://api.anthropic.com/v1/messages,
+   https://api.groq.com/openai/v1/chat/completions
+   ```
+4. Select a strategy: **Priority** or **Race**
+5. Set per-target timeout (milliseconds)
+6. Optionally configure body mapping and response extraction rules
+
+![Cascade Routes List Dashboard](../assets/cascade.png)
+
+## Activate a Route
+
+```bash
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Route-Key: ai-providers" \
+  -H "X-Identity-Key: Bearer $OPENAI_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+## Cascade Strategies
+
+### Priority (Sequential Failover)
+
+Targets are tried in order. The next target is only tried if the previous one fails (`5xx`, timeout, or connection error).
+
+```
+Target 1: https://api.openai.com/...  → fails (503)
+Target 2: https://api.anthropic.com/... → fails (timeout)
+Target 3: https://api.groq.com/...   → succeeds ✓
+
+Response: X-Rescued: cascade_fallback
+```
+
+**Best for:**
+- Saving costs (only one upstream is called per request in the happy path)
+- Payment APIs where you need deterministic ordering (primary provider first)
+- Any scenario where you want explicit control over which provider is tried first
+
+```bash
+# AI provider route — tries OpenAI first, then Anthropic, then Groq
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Route-Key: ai-priority" \
+  -H "X-Identity-Key: Bearer $OPENAI_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"messages": [{"role": "user", "content": "What is Go?"}]}'
+```
+
+### Race (Parallel)
+
+All targets are called simultaneously. The **fastest successful response wins**; the others are cancelled via context cancellation.
+
+```
+Target 1: https://api.openai.com/...   → responds in 1200ms ✗ (lost)
+Target 2: https://api.anthropic.com/... → responds in 890ms  ✗ (lost)
+Target 3: https://api.groq.com/...     → responds in 89ms   ✓ (wins)
+```
+
+**Best for:**
+- Ultra-low latency requirements where response time is critical
+- Read-only queries (exchange rates, lookups, embeddings) where duplicate calls are acceptable
+- Scenarios where all providers return equivalent responses
+
+```bash
+# Race mode — fastest provider wins
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Route-Key: ai-race" \
+  -H "Content-Type: application/json" \
+  -d '{"messages": [{"role": "user", "content": "Quick question"}]}'
+```
+
+<Aside type="tip">
+  Use **Priority** to save costs (only one API call in the happy path), and **Race** when latency is critical and you can afford parallel calls.
+</Aside>
+
+## Combining with Other Features
+
+### Route + Retry
+
+Each cascade target can be retried independently. Configure retries per request:
+
+```bash
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Route-Key: payment-cascade" \
+  -H "X-Retry-Count: 2" \
+  -H "X-Retry-Delay: 300ms" \
+  -H "X-Proxy-Timeout: 10s" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 9900, "currency": "usd"}'
+# Target 1 is retried up to 2 times before trying Target 2, etc.
+```
+
+### Route + Async Webhook
+
+Run a full cascade asynchronously:
+
+```bash
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Route-Key: payment-cascade" \
+  -H "X-Webhook-Callback: https://your-app.com/payments/done" \
+  -H "X-Proxy-Idempotency-Key: order_789_pay_1" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 9900, "currency": "usd"}'
+# Returns 202 immediately
+# Worker runs full cascade (priority or race) in background
+# POSTs first successful response to your callback
+```
+
+### Route + Smart Cache
+
+If all cascade targets fail, serve from cache:
+
+```bash
+curl https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Route-Key: exchange-rates-cascade" \
+  -H "X-Smart-Cache: 300s"
+# Tries all targets in the route
+# All fail → serves cache → X-Rescued: cache
+```
+
+## Target Request Body Mapping
+
+Request body mapping parses the client's incoming JSON body, renames keys, traverses nested fields and arrays, and restructures the payload before forwarding it to the upstream. Renamed source keys are automatically removed from the output.
+
+The mapping rule format is a comma-separated list of rules: `source_path=>target_path` or `source_path=>target_path(template)`.
+
+### Supported Path Syntax
+
+| Feature | Example | Description |
+|---|---|---|
+| Flat key rename | `amount=>sum` | Renames a top-level key |
+| Nested object (dot-notation) | `data.order=>data.order_id` | Renames `order` to `order_id` inside the `data` object |
+| Array traversal with `[]` | `data.orders[].order=>data.orders[].order_id` | Renames `order` to `order_id` for every item in the `orders` array |
+| Array traversal without `[]` | `data.orders.order=>data.orders.order_id` | Same as above — brackets are optional; auto-detected |
+| Value template | `order=>order_text(Order ID: #{value})` | Formats the field value inside a custom string |
+| Cross-field template | `status=>status(Order {order} status is {value})` | Interpolates other field values into the template |
+
+### How it works:
+1. Your client sends the request to the proxy gateway with the original JSON structure.
+2. The gateway intercepts the body and, before forwarding it to a target, renames and transforms keys as configured in that target's `body_map` rule.
+3. Nested paths and array items are traversed automatically. The rest of the payload keys remain untouched.
+
+**A. Flat Key Renaming**:
+```json
+// body_map: "amount=>sum, currency=>cur"
+// Input:  {"amount": 100, "currency": "USD"}
+// Output: {"sum": 100, "cur": "USD"}
+```
+
+**B. Nested Objects Mapping**:
+```json
+// body_map: "data.order=>data.order_id"
+// Input:  {"action": "get_status", "data": {"order": 353454876}}
+// Output: {"action": "get_status", "data": {"order_id": 353454876}}
+```
+
+**C. Array Traversal**:
+```json
+// body_map: "data.orders[].order=>data.orders[].order_id"
+//        or "data.orders.order=>data.orders.order_id"
+// Input:  {"data": {"orders": [{"order": 101}, {"order": 102}]}}
+// Output: {"data": {"orders": [{"order_id": 101}, {"order_id": 102}]}}
+```
+
+**D. Dynamic Value Template `{value}`**:
+
+Formats the mapped field's value inside a custom text string. Use `{value}` as a placeholder for the source field value:
+```json
+// body_map: "order=>order_text(Order ID: #{value})"
+// Input:  {"order": 101}
+// Output: {"order_text": "Order ID: #101"}
+```
+
+**E. Cross-Field Reference Template `{field_name}`**:
+
+Interpolates values of other fields from the same JSON context. Looks up fields in the current object first, then falls back to the global root:
+```json
+// body_map: "status=>status(Order {order} status is {value})"
+// Input:  {"order": 101, "status": "success"}
+// Output: {"order": 101, "status": "Order 101 status is success"}
+```
+
+**F. Sibling Field Reference in Arrays**:
+
+Accesses sibling keys within each individual array element during iteration:
+```json
+// body_map: "data.orders.status=>data.orders.status_text(Order {order} is {value})"
+// Input:  {"data": {"orders": [{"order": 101, "status": "success"}, {"order": 102, "status": "fail"}]}}
+// Output: {"data": {"orders": [{"order": 101, "status_text": "Order 101 is success"}, {"order": 102, "status_text": "Order 102 is fail"}]}}
+
+---
+
+## Custom Body Fallback Conditions
+
+By default, cascade routing triggers the next fallback only when a target endpoint returns a `5xx` status code, times out, or experiences connection errors.
+
+However, many APIs (particularly payment gateways) return a `200 OK` status even when a transaction is declined or fails. To support routing on business logic failures, each route target can define a custom fallback condition in the dashboard/database using two parameters:
+- `fallback_field`: A JSONPath expression pointing to the field in the response JSON to check. The `$.` prefix is **optional** — it is prepended automatically if omitted. Supports nested objects (dot-notation) and array elements (`[]` notation).
+- `fallback_value`: A string value to match (case-insensitive substring check).
+
+### Supported `fallback_field` Syntax
+
+| Example | Equivalent to | Description |
+|---|---|---|
+| `status` | `$.status` | Top-level field |
+| `error.code` | `$.error.code` | Nested object field |
+| `errors[].code` | `$.errors[*].code` | Field inside any element of an array |
+
+### How it works:
+1. The target endpoint responds with a successful status code (less than `500`).
+2. The gateway reads the response body and extracts the value at `fallback_field` using JSONPath.
+3. If the extracted value contains the `fallback_value` as a substring, the gateway treats the response as a **failure**.
+4. The gateway discards the response, logs the fallback trigger, and immediately falls back to the next target in the cascade chain.
+
+![Custom Fallback Configuration Dashboard](../assets/cascade_1.png)
+
+### Example: Payment Declined Fallback
+An upstream payment processor returns `200 OK` but declined the payment:
+```json
+{
+  "transaction_id": "tx_abc123",
+  "status": "declined",
+  "failure_reason": "insufficient_funds"
+}
+```
+
+By configuring the target with:
+- **Fallback Field**: `status` (or `$.status`)
+- **Fallback Value**: `declined`
+
+The gateway intercepts the `200 OK`, sees that `$.status` equals `"declined"`, treats it as a failure, and routes the payment request to the next backup bank target in your cascade.
+
+### Example: Array Error Code Fallback
+An upstream returns errors as an array:
+```json
+{
+  "errors": [{"code": "card_declined", "message": "Insufficient funds"}]
+}
+```
+
+By configuring the target with:
+- **Fallback Field**: `errors[].code`
+- **Fallback Value**: `card_declined`
+
+The gateway checks the `code` field of every element in the `errors` array and triggers a fallback if any of them match.
+
+---
+
+## Anti-Loop Protection
+
+The gateway validates all target URLs against its own IP addresses and hostnames. Any target URL that resolves to the proxy itself is rejected with `400 Bad Request` to prevent infinite request loops.
+
+## Response Headers for Cascade
+
+When a non-primary target is used, the response includes:
+
+```http
+HTTP/1.1 200 OK
+X-Rescued: cascade_fallback
+```
+
+If the primary target (first in the list) succeeds, no `X-Rescued` header is added.

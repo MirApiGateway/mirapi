@@ -1,0 +1,231 @@
+---
+title: Response Extraction
+description: Extract specific fields from upstream responses or redirect to a URL found in the response body.
+sidebar:
+  order: 2
+---
+
+
+MirApi can extract specific fields from upstream responses and reshape the JSON structure — or redirect to a URL found inside the response body — without any changes to your application code.
+
+Two headers control response transformation:
+
+- **`X-Extract-Redirect`** — Find a URL in the response body and redirect to it (`302 Found`)
+- **`X-Extract-Map`** — Extract and rename fields from the response body into a new JSON object
+
+## `X-Extract-Redirect`
+
+Extracts a URL from the upstream response body using a JSONPath expression (or a fallback chain with `||`) and issues a `302 Found` redirect to that URL.
+
+### Syntax Notes
+
+| Feature | Details |
+|---|---|
+| `$.` prefix | Optional — prepended automatically if omitted |
+| Array notation `[]` | Supported — extracts the redirect URL from matching array elements |
+
+This is useful for payment flows where the upstream returns a checkout URL in the response body and you need to redirect the user to it:
+
+```bash
+# Upstream returns: {"session_id": "cs_123", "url": "https://checkout.stripe.com/pay/cs_123"}
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/checkout/sessions" \
+  -H "X-Identity-Key: Bearer sk_live_..." \
+  -H "X-Extract-Redirect: url" \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "payment", "line_items": [...]}'
+# $.  is prepended automatically — same as X-Extract-Redirect: $.url
+# → 302 Found
+# → Location: https://checkout.stripe.com/pay/cs_123
+```
+
+### Fallback Chains with `||`
+
+Different payment providers use different field names for the checkout URL. Use `||` to try multiple paths in order. The `$.` prefix is optional for every term:
+
+```bash
+# Works across Stripe, Adyen, PayU, and other providers
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.payment-provider.com/sessions" \
+  -H "X-Extract-Redirect: url || checkoutUrl || data.payment_link || redirect_url" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 9900, "currency": "usd"}'
+# MirApi tries each path in order — first non-null value wins
+# → 302 Found with the discovered URL
+
+# Works the same with a nested path
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.adyen.com/checkout/v68/sessions" \
+  -H "X-Extract-Redirect: action.url || url" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": {"currency": "EUR", "value": 1000}, "reference": "order-123"}'
+```
+
+### Extracting from Arrays
+
+Use `[]` brackets to extract a redirect URL from elements inside an array:
+
+```bash
+# Upstream returns: {"data": {"orders": [{"id": "ord_1", "checkout_url": "https://pay.example.com/ord_1"}]}}
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.provider.com/checkout" \
+  -H "X-Extract-Redirect: data.orders[].checkout_url" \
+  -H "Content-Type: application/json" \
+  -d '{"order_ref": "ord_1"}'
+# → 302 Found
+# → Location: https://pay.example.com/ord_1
+```
+
+### Use Case: Universal Payment Redirect
+
+Build a single endpoint that works with multiple payment providers without knowing which field name each one uses:
+
+```bash
+# No matter which provider is in your cascade route, X-Extract-Redirect finds the URL
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Route-Key: payment-cascade" \
+  -H "X-Extract-Redirect: url || checkoutUrl || data.payment_link" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 9900, "currency": "usd"}'
+```
+
+## `X-Extract-Map`
+
+Response mapping parses the upstream service's response JSON, extracts fields using JSONPath, and constructs a brand-new JSON payload for the client. Only fields explicitly listed in the rules are returned — all other response fields are discarded (whitelist principle).
+
+### Syntax Overview
+
+The source (left side) and target (right side) of `=>` share a unified syntax:
+
+| Feature | Details |
+|---|---|
+| `$.` prefix on source | Optional — prepended automatically if missing |
+| Array notation on source | Use `[]` brackets instead of JSONPath wildcards `[*]` |
+| Nested target keys | Dot-notation supported (e.g. `data.order`) |
+| Multiple array queries | Merged into a single array by element index |
+| Value template `{value}` | Formats the extracted value inside a custom string |
+| Cross-field template `{field_name}` | Interpolates other fields from the same array element into the output |
+
+### A. Flat Extraction & Mapping
+
+Extracts a field and maps it to a new flat key. The `$.` prefix is optional:
+
+```bash
+curl https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.provider.com/orders" \
+  -H "X-Extract-Map: provider_data.order_id=>order_id"
+# Upstream: {"provider_data": {"order_id": 353454876}}
+# Returns:  {"order_id": "353454876"}
+
+# Extract the caller's IP from httpbin
+curl https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://httpbin.org/get" \
+  -H "X-Extract-Map: $.origin"
+# Returns: {"extracted": "93.123.45.67"}
+```
+
+### B. Nested Target Generation
+
+Creates nested JSON structures in the client output using dot-notation on the right side:
+
+```bash
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.provider.com/orders" \
+  -H "X-Extract-Map: provider_data.order_id=>data.order" \
+  -H "Content-Type: application/json" \
+  -d '{"ref": "ord_999"}'
+# Upstream: {"provider_data": {"order_id": 353454876}}
+# Returns:  {"data": {"order": "353454876"}}
+
+# Normalize Stripe response
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -H "X-Identity-Key: Bearer sk_live_..." \
+  -H "X-Extract-Map: $.id=>charge_id, $.status=>payment_status, $.amount=>amount_cents, $.created=>created_at" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 2000, "currency": "usd", "source": "tok_visa"}'
+# Returns: {"charge_id": "ch_3Pz9...", "payment_status": "succeeded", "amount_cents": 2000, "created_at": 1748130000}
+```
+
+### C. Array Extraction & Mapping
+
+Extracts arrays from upstream and places them under custom keys. Use `[]` brackets to iterate every element:
+
+```bash
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.provider.com/orders" \
+  -H "X-Extract-Map: provider_data.orders[].order_id=>data.orders[].order" \
+  -H "Content-Type: application/json" \
+  -d '{"customer": "cus_123"}'
+# Upstream: {"provider_data": {"orders": [{"order_id": 111}, {"order_id": 222}]}}
+# Returns:  {"data": {"orders": [{"order": "111"}, {"order": "222"}]}}
+```
+
+### D. Multi-Field Array Merging
+
+Multiple rules targeting the same array path are **merged by element index** into a single combined array:
+
+```bash
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.provider.com/orders" \
+  -H "X-Extract-Map: provider_data.orders[].order_id=>data.orders[].order, provider_data.orders[].amount=>data.orders[].sum" \
+  -H "Content-Type: application/json" \
+  -d '{"customer": "cus_123"}'
+# Upstream: {"provider_data": {"orders": [{"order_id": 111, "amount": 100}, {"order_id": 222, "amount": 200}]}}
+# Returns:  {"data": {"orders": [{"order": "111", "sum": "100"}, {"order": "222", "sum": "200"}]}}
+
+# AI provider normalization
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Route-Key: ai-providers" \
+  -H "X-Extract-Map: $.choices[0].message.content=>text, $.model=>model_used" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello"}]}'
+# Returns: {"text": "Hello! How can I help?", "model_used": "gpt-4o"}
+```
+
+### E. Value Templating & Cross-Field Array Templating
+
+Append a template string in parentheses after the target key name. Use `{value}` as the placeholder for the extracted field, and `{field_name}` to reference any sibling field within the same array element:
+
+```bash
+# Single-field value template
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.provider.com/orders" \
+  -H "X-Extract-Map: provider_data.orders[].order_id=>data.orders[].order_id, provider_data.orders[].status=>data.orders[].status_text(Order {order_id} is {value})" \
+  -H "Content-Type: application/json" \
+  -d '{"customer": "cus_123"}'
+# Upstream: {"provider_data": {"orders": [
+#   {"order_id": 111, "status": "success"},
+#   {"order_id": 222, "status": "fail"}
+# ]}}
+# Returns: {"data": {"orders": [
+#   {"order_id": "111", "status_text": "Order 111 is success"},
+#   {"order_id": "222", "status_text": "Order 222 is fail"}
+# ]}}
+```
+
+**Template placeholder rules:**
+- `{value}` — the extracted value of the source field
+- `{field_name}` — any sibling field already mapped to the same array element
+
+## Combining Both Headers
+
+`X-Extract-Redirect` and `X-Extract-Map` serve different purposes and cannot be combined in the same request. Use one or the other:
+
+| Header | Use when... | Response |
+|--------|-------------|----------|
+| `X-Extract-Redirect` | Upstream returns a URL to redirect to | `302 Found` with `Location` header |
+| `X-Extract-Map` | You want a trimmed/renamed JSON response | `200 OK` with transformed JSON body |

@@ -1,0 +1,406 @@
+---
+title: Headers Reference Guide
+description: Complete reference for all MirApi Gateway X-* control headers, their types, defaults, and examples.
+sidebar:
+  order: 1
+---
+
+
+Complete reference for all `X-*` control headers supported by MirApi Gateway. These headers are read by the gateway on every request and stripped before forwarding to the upstream API — so the upstream never sees them.
+
+---
+
+## Authentication
+
+### `X-MirApi-Key`
+**Required on every request.**
+
+Your MirApi API key. The gateway verifies it against a Redis cache using its SHA-256 hash. On cache miss, it falls back to the PostgreSQL database. Returns `401 Unauthorized` if missing or invalid.
+
+```bash
+curl https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: la_5fa62960e7c9af7c***" \
+  -H "X-Target-URL: https://httpbin.org/get"
+```
+
+---
+
+## Routing
+
+### `X-Target-URL`
+**Required** (unless `X-Route-Key` is used).
+
+The full URL of the upstream API endpoint to forward the request to. Must include the scheme (`https://`) and host. The gateway validates the URL and blocks any circular references back to itself.
+
+```bash
+# Basic GET proxy
+curl https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges"
+
+# POST with body
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.openai.com/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+### `X-Route-Key`
+Use a pre-configured route from your dashboard instead of `X-Target-URL`. The route stores the target URL, fallback targets, timeout, body mapping, and response extraction rules — none of these need to be in your request headers.
+
+```bash
+# Use a route named "payment-primary"
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Route-Key: payment-primary" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 9900, "currency": "usd"}'
+
+# Use a route with identity key for auth
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Route-Key: ai-cascade" \
+  -H "X-Identity-Key: Bearer sk_live_..."
+```
+
+When a route has multiple targets, the cascade strategy (priority or race) defined in the dashboard determines how they are tried.
+
+---
+
+## Secret Offloading
+
+### `X-Identity-Key`
+Forwards its value as the `Authorization` header to the upstream API. The key is read into memory for the duration of the request and never written to logs or persistent storage.
+
+```bash
+# Pass a Stripe key to upstream without it appearing in your logs
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -H "X-Identity-Key: Bearer sk_live_xxxxxxxxxxxxxxxxxxxx" \
+  -d '{"amount": 2000, "currency": "usd", "source": "tok_visa"}'
+
+# Pass an OpenAI key
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.openai.com/v1/chat/completions" \
+  -H "X-Identity-Key: Bearer sk-proj-xxxxxxxxxxxx" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4o", "messages": [...]}'
+```
+
+Stripe receives: `Authorization: Bearer sk_live_xxxx`  
+Your logs show: nothing about the key content
+
+### `X-Proxy-Master-Key`
+Decryption passphrase for credentials stored encrypted in the database. The gateway decrypts the matching credential using AES-GCM and injects it as `Authorization` before forwarding.
+
+```bash
+# Credential is matched by the host of X-Target-URL (e.g., "api.stripe.com" matches a credential named "stripe")
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -H "X-Proxy-Master-Key: my-encryption-passphrase" \
+  -d '{"amount": 2000, "currency": "usd"}'
+
+# Explicit credential selection by UUID (when you have multiple credentials for the same host)
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -H "X-Proxy-Master-Key: my-encryption-passphrase" \
+  -H "X-Credential-ID: 4a2e5d18-df99-4d66-a212-3cb5d9f0f9b3" \
+  -d '{"amount": 2000, "currency": "usd"}'
+```
+
+### `X-Credential-ID`
+Optional UUID of the specific credential record to use with `X-Proxy-Master-Key`. If omitted, the gateway matches the credential by the target hostname substring.
+
+---
+
+## Resilience
+
+### `X-Proxy-Timeout`
+Sets the maximum time the gateway will wait for a response from the upstream API per attempt. If the upstream does not respond within this duration, the attempt is considered a failure.
+
+Accepts Go duration strings: `500ms`, `1s`, `5s`, `30s`. Default: `30s`.
+
+```bash
+# Tight 2-second timeout — fail fast and retry
+curl https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -H "X-Proxy-Timeout: 2s" \
+  -H "X-Retry-Count: 3"
+
+# Generous 30-second timeout for a slow upstream
+curl https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.slowprovider.com/process" \
+  -H "X-Proxy-Timeout: 30s"
+```
+
+### `X-Retry-Count`
+Number of additional retry attempts on failure (`5xx` status or connection error). Default: `0` (no retries).
+
+### `X-Retry-Delay`
+Base delay between retries. The gateway uses **exponential backoff with jitter**: each retry waits `base_delay * 2^attempt + random_jitter (up to 50%)`, capped at 10 seconds.
+
+Accepts Go duration strings: `100ms`, `500ms`, `1s`. Default: `100ms`.
+
+```bash
+# 3 retries, starting at 200ms delay
+# Attempt 1: wait ~200ms
+# Attempt 2: wait ~400ms + jitter
+# Attempt 3: wait ~800ms + jitter
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -H "X-Retry-Count: 3" \
+  -H "X-Retry-Delay: 200ms" \
+  -H "X-Proxy-Timeout: 5s" \
+  -d '{"amount": 2000, "currency": "usd", "source": "tok_visa"}'
+
+# Aggressive retry for an unreliable third-party API
+curl https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.bankapi.com/transfer" \
+  -H "X-Retry-Count: 5" \
+  -H "X-Retry-Delay: 500ms" \
+  -H "X-Proxy-Timeout: 10s"
+```
+
+### `X-Circuit-Breaker`
+Enables the circuit breaker for the target host. Values: `on` or `true`.
+
+**How it works:**
+- The gateway tracks failures per target host in Redis.
+- After **5 consecutive failures within 1 minute**, the circuit opens (state: `OPEN`).
+- While `OPEN`, new requests to that host are blocked immediately.
+- The circuit auto-resets after **15 seconds** (attempting a probe request).
+- On success, the circuit resets (state: `CLOSED`).
+
+```bash
+# Enable circuit breaker — protect against a flaky payment gateway
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -H "X-Circuit-Breaker: on" \
+  -H "X-Smart-Cache: 300s" \
+  -d '{"amount": 2000, "currency": "usd", "source": "tok_visa"}'
+# If Stripe is down and circuit is OPEN:
+# → Smart Cache serves last successful response
+# → Response includes: X-Rescued: cache
+
+# Combine with failover for maximum resilience
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://primary-bank.com/pay" \
+  -H "X-Circuit-Breaker: on" \
+  -H "X-Failover-URL: https://backup-bank.com/pay" \
+  -H "X-Retry-Count: 2"
+```
+
+### `X-Smart-Cache`
+Caches the most recent successful upstream response in Redis for the specified duration. When the upstream fails (after all retries), the cached response is returned instead of an error.
+
+The cache key is computed from: `SHA256(ClientID + TargetURL + Method + Body)` — so different request bodies produce different cache entries.
+
+Accepts Go duration strings: `60s`, `5m`, `1h`.
+
+```bash
+# Cache exchange rates for 5 minutes — if the rates API goes down, serve last known rates
+curl https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.exchangerate.host/latest" \
+  -H "X-Smart-Cache: 300s"
+
+# Cache product catalog for 10 minutes
+curl https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.yourstore.com/v1/products" \
+  -H "X-Smart-Cache: 10m" \
+  -H "X-Retry-Count: 2"
+
+# Cache + circuit breaker: serve cache when circuit is open
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.openai.com/v1/embeddings" \
+  -H "X-Identity-Key: Bearer sk-proj-..." \
+  -H "X-Smart-Cache: 3600s" \
+  -H "X-Circuit-Breaker: on" \
+  -H "Content-Type: application/json" \
+  -d '{"input": "Hello world", "model": "text-embedding-3-small"}'
+```
+
+**Important**: Smart Cache is a **failure fallback only** — it does not serve cached responses for successful requests. Every request always attempts the upstream first. Cached data is only returned when all attempts fail.
+
+### `X-Failover-URL`
+A secondary upstream URL to try if the primary URL (`X-Target-URL`) fails after all retries. The response includes `X-Rescued: failover` when the failover endpoint responds successfully.
+
+```bash
+# If primary bank API fails, try backup provider
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://bank-a.com/api/pay" \
+  -H "X-Failover-URL: https://bank-b.com/api/pay" \
+  -H "X-Retry-Count: 2" \
+  -H "X-Proxy-Timeout: 5s" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 5000, "currency": "usd"}'
+
+# AI provider failover
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.openai.com/v1/chat/completions" \
+  -H "X-Identity-Key: Bearer $OPENAI_KEY" \
+  -H "X-Failover-URL: https://api.anthropic.com/v1/messages" \
+  -H "X-Proxy-Timeout: 10s" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4o", "messages": [...]}'
+```
+
+---
+
+## Idempotency
+
+### `X-Proxy-Idempotency-Key`
+A custom idempotency key to deduplicate requests. The gateway stores this key in Redis with a 60-second TTL using `SETNX`. If the same key arrives while a request is in-flight, the duplicate waits for completion and receives the same response. If the request is already complete, the cached response is returned instantly.
+
+If this header is **not provided**, the gateway auto-computes a key from `SHA256(ClientID + TargetURL + Method + Body)`.
+
+```bash
+# Explicit idempotency key — prevent duplicate payment charges
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -H "X-Identity-Key: Bearer sk_live_..." \
+  -H "X-Proxy-Idempotency-Key: order_789_charge_attempt_1" \
+  -H "X-Retry-Count: 3" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 9900, "currency": "usd", "source": "tok_visa"}'
+# If retried within 60s with the same key, returns the original response — no duplicate charge
+
+# Idempotency with webhook callback
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -H "X-Proxy-Idempotency-Key: txn_abc123" \
+  -H "X-Webhook-Callback: https://your-app.com/webhook" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 9900, "currency": "usd"}'
+# Returns 202 Accepted with job_id
+# If retried with same key → returns same 202 with same job_id (no duplicate job queued)
+```
+
+---
+
+## Asynchronous Processing
+
+### `X-Webhook-Callback`
+Enables asynchronous mode. The gateway immediately returns `202 Accepted` with a `job_id`, pushes the request to a Redis-backed worker queue, and POSTs the result to your callback URL when the upstream responds.
+
+The worker supports full retry logic and can retry for hours if the upstream is temporarily unavailable.
+
+Jobs are routed to plan-specific queues (`business`, `developer`, `free`) with weighted processing priority to prevent free-tier jobs from blocking paid customers.
+
+```bash
+# Basic async payment processing
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -H "X-Identity-Key: Bearer sk_live_..." \
+  -H "X-Webhook-Callback: https://your-app.com/api/webhooks/payments" \
+  -H "X-Proxy-Idempotency-Key: order_789_pay_1" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 9900, "currency": "usd", "source": "tok_visa"}'
+
+# Response:
+# HTTP/1.1 202 Accepted
+# {"status": "Accepted", "job_id": "8fd2a023-df21-4ea7-8b01-5d9f0f9b36ea"}
+
+# Async with cascade route and retries
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Route-Key: payment-cascade" \
+  -H "X-Webhook-Callback: https://your-app.com/results" \
+  -H "X-Retry-Count: 3" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 5000, "currency": "usd"}'
+```
+
+Your callback endpoint receives a `POST` with the upstream response body once the job completes.
+
+---
+
+## Response Transformation
+
+### `X-Extract-Redirect`
+Extracts a URL from the upstream response body using JSONPath and returns a `302 Found` redirect to that URL. Supports fallback chains with `||`.
+
+```bash
+# Extract payment redirect URL from response
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.payment-provider.com/create-session" \
+  -H "X-Extract-Redirect: $.url || $.checkoutUrl || $.data.payment_link" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 9900, "currency": "usd"}'
+# If upstream returns {"url": "https://checkout.stripe.com/c/pay/cs_..."} →
+# Gateway returns: 302 Found, Location: https://checkout.stripe.com/c/pay/cs_...
+
+# Extract from nested path
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.adyen.com/checkout/v68/sessions" \
+  -H "X-Extract-Redirect: $.action.url" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": {"currency": "EUR", "value": 1000}}'
+```
+
+### `X-Extract-Map`
+Extracts and renames fields from the upstream response body using JSONPath. Returns a transformed JSON object instead of the full upstream response.
+
+Two syntaxes supported:
+- **Single field**: `$.fieldPath` → returns `{"extracted": "value"}`
+- **Multi-field mapping**: `$.path1=>key1, $.path2=>key2` → returns `{"key1": "val1", "key2": "val2"}`
+
+```bash
+# Extract a single field
+curl https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://httpbin.org/get" \
+  -H "X-Extract-Map: $.origin"
+# Returns: {"extracted": "93.123.45.67"}
+
+# Map multiple fields to custom keys
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -H "X-Identity-Key: Bearer sk_live_..." \
+  -H "X-Extract-Map: $.id=>charge_id, $.status=>payment_status, $.amount=>amount_charged" \
+  -d '{"amount": 2000, "currency": "usd", "source": "tok_visa"}'
+# Returns: {"charge_id": "ch_3Pz9...", "payment_status": "succeeded", "amount_charged": 2000}
+
+# Normalize different API responses to your schema
+curl https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://legacy-crm.internal/api/users/42" \
+  -H "X-Extract-Map: $.user_identifier=>id, $.full_name=>name, $.email_address=>email"
+# Upstream returns: {"user_identifier": "u_42", "full_name": "John", "email_address": "j@x.com"}
+# MirApi returns:   {"id": "u_42", "name": "John", "email": "j@x.com"}
+```
+
+---
+
+## Response Header
+
+MirApi adds one header to responses when a request is rescued:
+
+| Header | Values | When present |
+|--------|--------|-------------|
+| `X-Rescued` | `cache` | Response served from Smart Cache after upstream failure |
+| `X-Rescued` | `failover` | Response served from `X-Failover-URL` after primary failed |
+| `X-Rescued` | `cascade_fallback` | Response served from a lower-priority cascade target |
+
+If a request succeeds on the first try with no rescue, `X-Rescued` is **not added** to the response.

@@ -1,0 +1,128 @@
+---
+title: Quickstart Guide
+description: Make your first resilient API call with MirApi Gateway in under 5 minutes.
+sidebar:
+  order: 2
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+
+
+Get your first resilient API call running in **under 5 minutes**.
+
+<Aside type="tip">
+  You don't need to install any SDK or change your existing code. Just point your request to `https://proxy.mirapi.io/`, add your API key and a few control headers, and MirApi handles the rest.
+</Aside>
+
+## Step 1: Get Your API Key
+
+Sign up at [mirapi.io](https://mirapi.io) and open the dashboard. Create a client group and generate your first API key. Your key will look like:
+
+```bash
+export MIRAPI_KEY="la_5fa62960e7c9af7c***"
+```
+
+## Step 2: Make Your First Proxy Request
+
+Send your request to `https://proxy.mirapi.io/` and specify the destination URL in the `X-Target-URL` header:
+
+```bash
+# Original direct call to Stripe
+curl -X POST https://api.stripe.com/v1/customers \
+  -H "Authorization: Bearer sk_live_..."
+
+# The same call, proxied via MirApi
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/customers" \
+  -H "X-Identity-Key: Bearer sk_live_..."
+```
+
+MirApi intercepts the request, verifies your key, strips the `X-*` proxy headers, injects `Authorization: Bearer sk_live_...` from `X-Identity-Key`, and forwards the request to Stripe. The Stripe response is returned to you unchanged.
+
+## Step 3: Add Resilience Headers
+
+Enhance your calls with retry logic, timeout, and smart caching:
+
+```bash
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -H "X-Identity-Key: Bearer sk_live_..." \
+  -H "X-Retry-Count: 3" \
+  -H "X-Retry-Delay: 100ms" \
+  -H "X-Proxy-Timeout: 5s" \
+  -H "X-Circuit-Breaker: on" \
+  -H "X-Smart-Cache: 60s" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 2000, "currency": "usd", "source": "tok_visa"}'
+```
+
+What happens step by step:
+1. Request arrives → your key is verified
+2. Body scanned for card numbers (none found → continues)
+3. Idempotency key auto-computed from `SHA256(ClientID + TargetURL + Method + Body)`
+4. Circuit breaker checked for `api.stripe.com` → currently CLOSED → proceeds
+5. Request forwarded to Stripe with a 5-second timeout
+6. If Stripe returns a `5xx` or times out → retry up to 3 times with exponential backoff
+7. If all retries fail → check Smart Cache for a previous successful response for this exact request
+
+## Step 4: Verify the Response
+
+If the request was rescued from cache, you'll see the `X-Rescued` header:
+
+```http
+HTTP/1.1 200 OK
+X-Rescued: cache
+Content-Type: application/json
+
+{
+  "id": "ch_3Pz9...",
+  "status": "succeeded"
+}
+```
+
+If the request succeeded on first try, no `X-Rescued` header is added — it's only present when a rescue mechanism was used.
+
+## Step 5: Use a Pre-configured Route (Optional)
+
+For complex multi-target scenarios, configure a route in your dashboard and use `X-Route-Key` instead of `X-Target-URL`:
+
+```bash
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Route-Key: stripe-charges" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 2000, "currency": "usd"}'
+```
+
+The route `stripe-charges` is configured in your dashboard with the target URL, timeout, body mapping rules, and response extraction rules — none of this needs to be in your headers.
+
+## Quick Reference — All Supported Headers
+
+| Header | Example Value | Description |
+|--------|--------------|-------------|
+| `X-MirApi-Key` | `la_5fa629...` | **Required.** Your MirApi authentication key |
+| `X-Target-URL` | `https://api.stripe.com/v1/charges` | Destination API endpoint (required unless using `X-Route-Key`) |
+| `X-Route-Key` | `stripe-charges` | Use a pre-configured dashboard route instead of `X-Target-URL` |
+| `X-Identity-Key` | `Bearer sk_live_...` | Forwarded as the `Authorization` header to the upstream (ephemeral — never stored) |
+| `X-Proxy-Master-Key` | `my-master-passphrase` | Decryption key for database-stored encrypted credentials |
+| `X-Retry-Count` | `3` | Max retry attempts on `5xx` or connection failure |
+| `X-Retry-Delay` | `100ms` | Base delay for exponential backoff (e.g., `100ms`, `1s`) |
+| `X-Proxy-Timeout` | `5s` | Per-attempt timeout (e.g., `500ms`, `5s`, `30s`) |
+| `X-Circuit-Breaker` | `on` | Enable circuit breaker for the target host |
+| `X-Smart-Cache` | `60s` | Cache TTL for successful responses; used as fallback on failure |
+| `X-Failover-URL` | `https://backup-api.com/v1/charges` | Secondary endpoint if all retries to primary fail |
+| `X-Webhook-Callback` | `https://your-app.com/webhook` | Enable async mode — returns `202 Accepted`, POSTs result to your callback |
+| `X-Proxy-Idempotency-Key` | `order_789_attempt_1` | Custom idempotency key (auto-computed if omitted) |
+| `X-Extract-Redirect` | `$.url \|\| $.checkoutUrl` | Extract a URL from the response body and redirect to it |
+| `X-Extract-Map` | `$.origin=>ip, $.url=>dest` | Extract and rename fields from the response JSON |
+| `X-Credential-ID` | `4a2e5d18-...` | Explicit credential UUID for `X-Proxy-Master-Key` lookup |
+
+## Next Steps
+
+- [Retry Loops & Backoff](/docs/reliability/retries) — Fine-tune retry behavior
+- [Smart Cache Fallbacks](/docs/reliability/cache-fallbacks) — Serve stale responses on upstream failure
+- [Circuit Breakers](/docs/reliability/circuit-breakers) — Protect from cascading failures
+- [Cascade Routing](/docs/routing/cascade) — Route across multiple endpoints via the dashboard
+- [Headers Reference](/docs/api-reference/headers) — Complete header documentation

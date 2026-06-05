@@ -1,0 +1,177 @@
+---
+title: Webhook Callback Queue
+description: Process API calls asynchronously using MirApi's background worker queue with full retry support.
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+
+MirApi's async webhook mode offloads API calls to a background worker pool, returning an immediate `202 Accepted` to your caller. When the upstream responds, MirApi POSTs the result to your callback URL. The worker supports full retry logic and will continue retrying for hours if the upstream is temporarily unavailable.
+
+## How It Works
+
+```
+Your App                  MirApi                    Upstream API
+    |                        |                            |
+    |──POST (+ X-Webhook)───→|                            |
+    |←──202 Accepted─────────|                            |
+    |   {"job_id": "..."}    |                            |
+    |                        |──push to Redis queue──→   |
+    |                        |                       (async worker)
+    |                        |←──upstream response────────|
+    |←──POST /your/webhook───|                            |
+    |   (full response)      |
+```
+
+**Why use async mode?**
+- Your app's request thread is released immediately — no waiting for slow upstreams
+- The worker retries for hours if needed, handling transient outages transparently
+- Combine with `X-Proxy-Idempotency-Key` to prevent duplicate job submissions
+- Jobs are queued per subscription tier (`business`, `developer`, `free`) for fair scheduling
+
+## Basic Usage
+
+```bash
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -H "X-Identity-Key: Bearer sk_live_..." \
+  -H "X-Webhook-Callback: https://your-app.com/api/webhooks/payments" \
+  -H "X-Proxy-Idempotency-Key: order_789_pay_attempt_1" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 9900, "currency": "usd", "source": "tok_visa"}'
+```
+
+**Immediate response:**
+
+```
+HTTP/1.1 202 Accepted
+Content-Type: application/json
+
+{
+  "status": "Accepted",
+  "job_id": "8fd2a023-df21-4ea7-8b01-5d9f0f9b36ea"
+}
+```
+
+## Required Header
+
+| Header | Required | Description |
+|--------|----------|-------------|
+| `X-Webhook-Callback` | Yes | Your endpoint URL that receives the `POST` when the job completes |
+
+## What Your Callback Receives
+
+When the background worker completes the upstream call, it sends a `POST` to your `X-Webhook-Callback` URL. The body is the raw response body from the upstream API — exactly what you would have received in a synchronous call.
+
+**On success**, your callback receives the upstream response body:
+
+```
+POST https://your-app.com/api/webhooks/payments
+Content-Type: application/json
+
+{
+  "id": "ch_3Pz9...",
+  "status": "succeeded",
+  "amount": 9900,
+  "currency": "usd"
+}
+```
+
+**On failure** (all retries exhausted), your callback receives an error payload:
+
+```json
+{
+  "error": "upstream_failed",
+  "job_id": "8fd2a023-df21-4ea7-8b01-5d9f0f9b36ea",
+  "status_code": 503,
+  "message": "All retry attempts failed for https://api.stripe.com/v1/charges"
+}
+```
+
+## Combining with Retry Logic
+
+The async worker uses the same retry engine as synchronous requests. Use `X-Retry-Count` and `X-Retry-Delay` to control the retry behavior:
+
+```bash
+# Payment with 5 retries, starting at 1 second delay
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -H "X-Identity-Key: Bearer sk_live_..." \
+  -H "X-Webhook-Callback: https://your-app.com/api/webhooks/payments" \
+  -H "X-Proxy-Idempotency-Key: order_789_pay_1" \
+  -H "X-Retry-Count: 5" \
+  -H "X-Retry-Delay: 1s" \
+  -H "X-Proxy-Timeout: 10s" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 9900, "currency": "usd", "source": "tok_visa"}'
+```
+
+## Combining with Cascade Routes
+
+Use `X-Route-Key` with `X-Webhook-Callback` to run the full cascade strategy asynchronously:
+
+```bash
+# Async AI request across multiple providers
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Route-Key: ai-providers" \
+  -H "X-Webhook-Callback: https://your-app.com/ai-results" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Summarize this document: ..."}'
+# Returns 202 immediately
+# Worker tries openai → anthropic → groq (based on route config)
+# POSTs the first successful response to your webhook
+```
+
+## Idempotency for Async Jobs
+
+Always provide `X-Proxy-Idempotency-Key` when processing payments asynchronously. If the same key arrives again within 60 seconds (e.g., due to a client retry), MirApi returns the same `202` response with the same `job_id` — no duplicate job is queued.
+
+```bash
+# First request → creates job, returns job_id
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -H "X-Webhook-Callback: https://your-app.com/webhook" \
+  -H "X-Proxy-Idempotency-Key: charge_order_123" \
+  -d '{"amount": 5000, "currency": "usd"}'
+# → 202: {"status": "Accepted", "job_id": "abc-123"}
+
+# Same key sent again within 60 seconds → no new job
+# → 202: {"status": "Accepted", "job_id": "abc-123"}  (same job_id, cached response)
+```
+
+<Aside type="tip">
+  For webhook callback security, validate that the request to your callback URL is coming from MirApi by checking the `X-MirApi-Key` match or using network firewall rules to allow only MirApi's IP range.
+</Aside>
+
+## Practical Example: E-commerce Payment Flow
+
+```bash
+# Step 1: Submit the charge async
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -H "X-Identity-Key: Bearer sk_live_..." \
+  -H "X-Webhook-Callback: https://myshop.com/api/payments/confirm" \
+  -H "X-Proxy-Idempotency-Key: order_456_cart_789_attempt_1" \
+  -H "X-Retry-Count: 3" \
+  -H "X-Proxy-Timeout: 15s" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "amount": 25000,
+    "currency": "usd",
+    "source": "tok_visa",
+    "description": "Order #456"
+  }'
+
+# Step 2: Your app responds to the user immediately ("Processing payment...")
+
+# Step 3: MirApi worker calls Stripe, retries if needed
+# Step 4: Stripe succeeds → MirApi POSTs to https://myshop.com/api/payments/confirm
+# Step 5: Your handler marks the order as paid
+```

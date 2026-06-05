@@ -1,0 +1,89 @@
+---
+title: Zero Log Policy
+description: MirApi never writes request or response bodies to disk or logs — only metadata is recorded.
+sidebar:
+  order: 3
+---
+
+
+MirApi Gateway features a built-in **Zero Log policy** that is active on every request by default. Request and response body payloads are processed entirely in memory and are **never** written to persistent storage, disk, or debug streams. Only high-level metadata is recorded.
+
+No configuration headers are required. This policy cannot be disabled.
+
+## What Is Logged
+
+MirApi records only the following metadata fields for each proxy transaction:
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| `method` | HTTP request method | `POST` |
+| `url` | The targeted upstream endpoint | `https://api.stripe.com/v1/charges` |
+| `status_code` | HTTP response status code from upstream | `200` |
+| `group_id` | Your client group identifier | `grp_5fa629...` |
+| `latency_ms` | Total round-trip processing time | `142ms` |
+| `req_body_size` | Size of the request body in bytes | `142 B` |
+| `resp_body_size` | Size of the response body in bytes | `385 B` |
+
+**Never stored:** request body content, response body content, `Authorization` header values, `X-Identity-Key` values, any other header values.
+
+## How It Works
+
+```
+Your App → MirApi Gateway → Upstream API
+                │
+                ├─ In-memory: PCI scan, resilience, transformation
+                ├─ In-memory: upstream response processing
+                │
+                ├─ Logged to Redis buffer (metadata only):
+                │   method, url, status, latency, body sizes, group_id
+                │
+                └─ Batch-flushed to PostgreSQL every 10-30 seconds
+                   (metadata only, bodies never written)
+```
+
+Log entries are buffered in Redis using `LPUSH pending_logs` and flushed to PostgreSQL in batches by a background worker. This decouples logging from the request path and prevents database contention during traffic spikes.
+
+## Example: What Your Logs Show
+
+```bash
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -H "X-Identity-Key: Bearer sk_live_xxxx" \
+  -d '{"source": "tok_visa", "amount": 15000, "currency": "usd"}'
+```
+
+**Dashboard log entry:**
+
+```
+method:         POST
+url:            https://api.stripe.com/v1/charges
+status_code:    200
+group_id:       grp_5fa629...
+latency_ms:     241
+req_body_size:  58 B
+resp_body_size: 1204 B
+```
+
+**Never stored:** `{"source": "tok_visa", "amount": 15000, "currency": "usd"}`, `Bearer sk_live_xxxx`, or any response body content.
+
+## PCI-DSS Compliance Note
+
+If the PCI-DSS guard detects a raw card number in the request body and blocks the request, the audit log for that event is similarly metadata-only:
+
+| Field | Description |
+|-------|-------------|
+| `client_ip` | IP address of the requester |
+| `timestamp` | Unix timestamp of the blocked request |
+| `group_id` | Your client group identifier |
+
+The flagged request body is **never written** to any storage — not even temporarily. The detection and blocking happens entirely in memory.
+
+## Why This Architecture
+
+MirApi processes payment data, AI prompts, banking transfers, and other sensitive payloads for thousands of clients. Storing body content would:
+- Require full PCI-DSS certification for persistent storage of payment data
+- Create a liability if logs are breached (card numbers, PII, API keys)
+- Increase storage costs significantly for high-traffic clients
+
+The Zero Log architecture eliminates these risks by design — no body data ever touches persistent storage, making MirApi a safe intermediary for even the most sensitive integrations.

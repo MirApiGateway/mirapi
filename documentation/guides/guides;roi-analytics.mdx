@@ -1,0 +1,66 @@
+---
+title: ROI Analytics & Rescued Capital
+description: Understand how MirApi Gateway tracks your API reliability and calculates saved transaction capital.
+sidebar:
+  order: 2
+---
+
+
+MirApi Gateway provides detailed analytics showing the exact value and return on investment (ROI) it delivers to your application. Instead of showing abstract uptime percentages, the gateway tracks concrete performance metrics including **Rescued Requests** and **Rescued Capital**.
+
+---
+
+## What is a "Rescued Request"?
+
+A request is classified as **rescued** if it initially failed (due to upstream outages, connection timeouts, or rate limits) but ultimately succeeded because the gateway intervened using one of its resilience modules.
+
+The gateway increments the rescued count when:
+1. **Retries Succeeded**: The primary call failed, but a subsequent retry attempt (`X-Retry-Count`) succeeded.
+2. **Failover Resolved**: The primary URL failed, but the request was saved by calling the `X-Failover-URL`.
+3. **Smart Cache Served**: The upstream failed, and the gateway served a fresh cached response (`X-Smart-Cache`).
+4. **Cascade Fallback Completed**: The primary target in a sequential cascade route failed, but a backup target resolved the request successfully.
+
+Rescued responses contain the `X-Rescued` header diagnostic, indicating how the request was saved (`cache`, `failover`, or `cascade_fallback`).
+
+---
+
+## Rescued Capital Tracking
+
+For e-commerce, banking, and payment applications, a failed API request represents lost revenue. The gateway automatically calculates the amount of transaction volume it protects.
+
+### How it works:
+1. **Body Parsing**: For every incoming request, the gateway inspects the JSON payload for a field named `amount` (case-insensitive).
+2. **Amount Extraction**: If found, it parses the value into a decimal number (supports integers, floats, and numeric strings).
+3. **Trigger**: If the request fails on the first try but is successfully **rescued** by any of the resilience layers, the gateway logs the extracted amount as saved capital.
+4. **Aggregation**: The saved capital is summed over monthly horizons.
+
+**Example Scenario**:
+1. Your client app makes a payment request: `POST /v1/charges` with body `{"amount": 150.00, "currency": "usd"}`.
+2. The primary Stripe API returns `502 Bad Gateway`.
+3. MirApi Gateway intercepts the failure, retries the request after a short delay, and the second attempt succeeds.
+4. The user receives a success response. The gateway registers:
+   - **Rescued Request**: `+1`
+   - **Rescued Capital**: `+$150.00`
+
+---
+
+## Database Sync Architecture
+
+To ensure high throughput and prevent write locks under load, the gateway uses a buffered writing architecture:
+- Metrics are first aggregated in Redis using atomic operations:
+  - `user:metrics:<id>:total_requests`
+  - `user:metrics:<id>:rescued_requests`
+  - `user:metrics:<id>:rescued_capital`
+- The user is flagged in the Redis set `users_metrics_to_sync`.
+- A decoupled flusher worker (`StartMetricsFlusher`) running in the background pops dirty users, aggregates Redis values, and commits them in batches to the PostgreSQL `user_metrics` database table every 10–30 seconds.
+
+---
+
+## ROI Dashboard
+
+These metrics are exposed in real-time in the client dashboard. Clients can see:
+- **Rescued Requests**: Total number of transactions saved from failing.
+- **Rescued Capital**: Total monetary value of transactions that would have failed without the gateway.
+- **Protection ROI**: Graphic representation of saved pipelines vs. proxy subscription cost.
+
+![ROI Dashboard Analytics Screenshot](../assets/workspace.png)

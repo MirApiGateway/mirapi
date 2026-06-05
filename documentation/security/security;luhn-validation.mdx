@@ -1,0 +1,107 @@
+---
+title: PCI-DSS Luhn Card Validation
+description: Automatically detect and block raw credit card numbers in request bodies using the Luhn algorithm.
+sidebar:
+  order: 1
+---
+
+
+MirApi Gateway scans every request body for raw credit card numbers using the **Luhn algorithm** and blocks them automatically. This is a built-in, always-on protection — no configuration is required.
+
+## Why This Matters
+
+Sending raw card numbers to any API — even to legitimate payment processors — is a serious PCI-DSS compliance violation. A single leaked card number in your logs or a misrouted request can result in regulatory fines and fraud liability. MirApi eliminates this risk at the proxy layer before the request ever leaves your infrastructure.
+
+> **Zero persistence**: The request body is scanned in memory only. Even if a card number is detected and blocked, the body content is never written to logs, disk, or any persistent storage. Only metadata is recorded: client IP, Unix timestamp, and client group ID.
+
+## How It Works
+
+On every request, **before** forwarding to the upstream API:
+
+1. The raw request body is read into memory
+2. All sequences of 13–16 consecutive digits are extracted using a regex scan
+3. Each sequence is checked using the **Luhn algorithm** (checksum validation used by all major card brands)
+4. If any sequence passes the Luhn check → the request is **blocked immediately** with `400 Bad Request`
+5. The block is logged (metadata only) for your audit trail in the dashboard
+
+This validation runs **before** the idempotency check, retry logic, and upstream forwarding — the body never leaves the proxy.
+
+## Blocked Request Example
+
+```bash
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -d '{"card_number": "4111111111111111", "amount": 15000}'
+```
+
+**Response:**
+
+```http
+HTTP/1.1 400 Bad Request
+Content-Type: text/plain
+
+Error: Clear-text payment data detected. Please use tokenization (Stripe/Braintree tokens) instead of raw card numbers.
+```
+
+## What Gets Blocked (and Why)
+
+The Luhn algorithm is the industry-standard checksum used by all major card brands. Any digit sequence that:
+- Is 13–16 digits long (no spaces, dashes, or other characters between digits)
+- Passes the Luhn checksum
+
+...is treated as a potential card number and blocked.
+
+**Cards detected include:**
+
+| Brand | Length | Prefix |
+|-------|--------|--------|
+| Visa | 16 digits | Starts with `4` |
+| Mastercard | 16 digits | Starts with `51-55` or `2221-2720` |
+| American Express | 15 digits | Starts with `34` or `37` |
+| Discover | 16 digits | Starts with `6011`, `622`, `64`, or `65` |
+| Diners Club | 14–16 digits | Starts with `300-305`, `309`, `36`, `38`, or `39` |
+
+## What Passes Through
+
+The validator only blocks **valid** card numbers (Luhn check passes). Numbers that look like card numbers but fail the Luhn checksum are allowed through. For example:
+
+```json
+{"amount": 49.431, "currency": "4444121111112222"}
+```
+
+The sequence `4444121111112222` fails the Luhn checksum → it is **not** detected as a card number → the request passes through. Always use tokenized values (Stripe tokens like `tok_visa`, `pm_xxx`, `src_xxx`) instead of raw card numbers in your request bodies.
+
+## Correct Usage — Use Tokens
+
+Instead of sending raw card data, use your payment provider's tokenization:
+
+```bash
+# ❌ Wrong — will be blocked
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -d '{"card": "4111111111111111", "amount": 2000}'
+
+# ✅ Correct — tokenized card (Stripe.js or mobile SDK creates the token)
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -H "X-Identity-Key: Bearer sk_live_..." \
+  -H "Content-Type: application/json" \
+  -d '{"source": "tok_visa", "amount": 2000, "currency": "usd"}'
+```
+
+Stripe tokens (`tok_*`), Payment Methods (`pm_*`), and Setup Intents (`seti_*`) never contain raw card numbers — they are opaque references that Stripe resolves server-side.
+
+## Audit Logging
+
+When a card number is detected and blocked, MirApi records the following metadata (the body is never stored):
+
+| Field | Description |
+|-------|-------------|
+| `client_ip` | IP address of the requester |
+| `timestamp` | Unix timestamp of the blocked request |
+| `group_id` | Your client group identifier |
+
+This audit log is visible in the **Security Events** section of your dashboard.

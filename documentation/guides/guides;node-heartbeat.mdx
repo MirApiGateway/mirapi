@@ -1,0 +1,55 @@
+---
+title: Multi-Node Clustering & Heartbeats
+description: Understand how MirApi Gateway handles multi-node coordination, health reporting, and clustering.
+sidebar:
+  order: 3
+---
+
+
+To scale horizontally and provide low latency globally, MirApi Gateway runs as a distributed cluster of independent gateway nodes. This guide explains how nodes coordinate state and report health using a decentralized Redis heartbeat system.
+
+---
+
+## Decentralized Health Reporting
+
+Rather than using a heavy, centralized control plane, gateway nodes coordinate state asynchronously using **Redis**. Each node runs an independent background heartbeat thread (`StartHeartbeat`).
+
+### The Heartbeat Loop:
+1. **Startup**: When a node initializes, it identifies its IP address, retrieves its configured region, and reports its startup state to Redis.
+2. **Interval**: Every $N$ seconds (configured via `NODE_HEARTBEAT_INTERVAL`), the node collects local resource utilization metrics and updates its state in Redis.
+3. **TTL (Time-to-Live)**: The Redis key is written with a strict TTL (configured via `NODE_HEARTBEAT_TTL`, e.g., 15 seconds). If a node crashes or goes offline, its key automatically expires from Redis, signaling to the dashboard that the node is offline.
+4. **Graceful Shutdown**: On a clean shutdown, the node interceptor deletes its heartbeat key from Redis immediately, ensuring the dashboard registers the disconnect without waiting for the TTL to expire.
+
+---
+
+## Heartbeat Data Schema
+
+The node state is stored in Redis at the key `proxy:node:<node_name>` as a JSON payload:
+
+```json
+{
+  "node_name": "gateway-eu-1",
+  "region": "eu-central-1",
+  "last_heartbeat": "2026-05-26T17:21:00Z",
+  "ip": "10.0.1.45",
+  "mem_alloc_mb": 14.85,
+  "num_goroutine": 42
+}
+```
+
+### Fields Tracked:
+- `node_name`: The unique identifier of the node.
+- `region`: The geographical or cloud provider region where the node is deployed.
+- `last_heartbeat`: A UTC timestamp of the last successful heartbeat write.
+- `ip`: The private/local IP address of the node inside the cluster.
+- `mem_alloc_mb`: Current RAM memory allocated by the Go runtime in megabytes (obtained via `runtime.ReadMemStats`).
+- `num_goroutine`: The number of active Go execution threads (goroutines) currently running on the node, representing connection load.
+
+---
+
+## Cluster Dashboard Visualization
+
+The MirApi admin dashboard queries Redis for keys matching `proxy:node:*`. The dashboard aggregates these records to present a live view of:
+- **Active Node Count**: The number of currently running gateway instances.
+- **Resource Utilization**: Real-time RAM allocation and goroutine counts across the cluster.
+- **Geographic Load Distribution**: Traffic routing visualized by active regions (e.g. directing US traffic to `us-east-1` nodes).

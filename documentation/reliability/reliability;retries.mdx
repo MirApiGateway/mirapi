@@ -1,0 +1,161 @@
+---
+title: Retry Loops & Backoff
+description: Configure automatic retry behavior with exponential backoff and jitter for any upstream API.
+sidebar:
+  order: 1
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+
+MirApi Gateway's retry engine automatically re-fires failed requests with **exponential backoff and jitter**, protecting your integrations from transient upstream failures — timeouts, `5xx` errors, and connection drops.
+
+## How Retry Works
+
+When an upstream request fails (connection error or `5xx` response), the gateway waits and retries automatically. The delay follows this formula:
+
+```
+delay = base_delay × 2^attempt + random_jitter (up to 50% of delay)
+```
+
+Maximum delay is capped at **10 seconds** per attempt. Example with `X-Retry-Delay: 200ms` and `X-Retry-Count: 4`:
+
+```
+Initial attempt:   → fails (e.g. 503)
+Retry 1:  wait ~200ms + jitter  → retry
+Retry 2:  wait ~400ms + jitter  → retry
+Retry 3:  wait ~800ms + jitter  → retry
+Retry 4:  wait ~1600ms + jitter → retry or give up
+```
+
+Jitter distributes retry load across multiple clients so they don't all hammer the upstream at the same time.
+
+## Required Headers
+
+| Header | Default | Description |
+|--------|---------|-------------|
+| `X-Retry-Count` | `0` | Number of retry attempts (0 = disabled, max practical: 10) |
+| `X-Retry-Delay` | `100ms` | Base delay for exponential backoff. Accepts Go durations: `100ms`, `500ms`, `1s` |
+| `X-Proxy-Timeout` | `30s` | Per-attempt timeout. Accepts Go durations: `1s`, `5s`, `30s` |
+
+## Use Cases
+
+### 1. Basic Retry for Transient Failures
+
+The most common use case — retry on `5xx` or timeout:
+
+```bash
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -H "X-Identity-Key: Bearer sk_live_..." \
+  -H "X-Retry-Count: 3" \
+  -H "X-Retry-Delay: 500ms" \
+  -H "X-Proxy-Timeout: 5s" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 2000, "currency": "usd", "source": "tok_visa"}'
+```
+
+### 2. Retry with Idempotency Key (Payments)
+
+For payment endpoints, always pair retries with `X-Proxy-Idempotency-Key` to prevent duplicate charges:
+
+```bash
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -H "X-Identity-Key: Bearer sk_live_..." \
+  -H "X-Retry-Count: 3" \
+  -H "X-Retry-Delay: 1s" \
+  -H "X-Proxy-Timeout: 10s" \
+  -H "X-Proxy-Idempotency-Key: order_789_charge_attempt_1" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 9900, "currency": "usd", "source": "tok_visa"}'
+# If all 3 retries succeed at different points, only one charge is created
+# because Stripe deduplicates on the forwarded Idempotency-Key
+```
+
+<Aside type="caution">
+  Always use `X-Proxy-Idempotency-Key` with retries for payment endpoints to prevent duplicate charges. Without it, each retry attempt is treated as a fresh request by the upstream.
+</Aside>
+
+### 3. Retry + Smart Cache Fallback
+
+If all retries fail, serve the last cached successful response:
+
+```bash
+curl https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.exchangerate.host/latest" \
+  -H "X-Retry-Count: 3" \
+  -H "X-Retry-Delay: 200ms" \
+  -H "X-Smart-Cache: 300s"
+# If all 3 retries fail:
+# → serves last cached exchange rates from Redis
+# → response includes: X-Rescued: cache
+```
+
+### 4. Retry + Failover URL
+
+After all primary retries fail, try a secondary endpoint:
+
+```bash
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://primary-bank.com/api/charge" \
+  -H "X-Failover-URL: https://backup-bank.com/api/charge" \
+  -H "X-Retry-Count: 2" \
+  -H "X-Retry-Delay: 500ms" \
+  -H "X-Proxy-Timeout: 8s" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 5000, "currency": "usd"}'
+# primary fails × 2 → tries backup bank
+# response includes: X-Rescued: failover
+```
+
+### 5. Fast-fail Retry for AI APIs
+
+For latency-sensitive AI requests, use tight timeouts to fail fast and retry quickly:
+
+```bash
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.openai.com/v1/chat/completions" \
+  -H "X-Identity-Key: Bearer sk-proj-..." \
+  -H "X-Retry-Count: 2" \
+  -H "X-Retry-Delay: 100ms" \
+  -H "X-Proxy-Timeout: 8s" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+### 6. Async Retry (Long-running Jobs)
+
+Use `X-Webhook-Callback` for operations where the upstream may take minutes or hours to recover. The background worker continues retrying across restarts:
+
+```bash
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -H "X-Identity-Key: Bearer sk_live_..." \
+  -H "X-Webhook-Callback: https://your-app.com/webhook" \
+  -H "X-Proxy-Idempotency-Key: order_789_attempt_1" \
+  -H "X-Retry-Count: 5" \
+  -H "X-Retry-Delay: 2s" \
+  -d '{"amount": 9900, "currency": "usd"}'
+# Returns 202 immediately
+# Worker retries: 2s, 4s, 8s, 10s (capped), 10s+jitter
+# POSTs result to callback when Stripe responds
+```
+
+## Backoff Timing Reference
+
+| Attempt | `X-Retry-Delay: 100ms` | `X-Retry-Delay: 500ms` | `X-Retry-Delay: 1s` |
+|---------|------------------------|------------------------|---------------------|
+| 1 | ~100ms + jitter | ~500ms + jitter | ~1s + jitter |
+| 2 | ~200ms + jitter | ~1000ms + jitter | ~2s + jitter |
+| 3 | ~400ms + jitter | ~2000ms + jitter | ~4s + jitter |
+| 4 | ~800ms + jitter | ~4000ms + jitter | ~8s + jitter |
+| 5 | ~1600ms + jitter | ~8000ms + jitter | ~10s (capped) |
+
+All delays are capped at **10 seconds** maximum.

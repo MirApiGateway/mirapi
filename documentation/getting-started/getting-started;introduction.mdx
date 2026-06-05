@@ -1,0 +1,75 @@
+---
+title: Introduction & Architecture
+description: Learn how MirApi Gateway works, its request lifecycle, and why it's the right choice for resilient API integrations.
+sidebar:
+  order: 1
+---
+
+
+MirApi Gateway is a **header-driven API proxy** that sits between your application and any third-party API. By pointing your requests to `https://proxy.mirapi.io/` and adding HTTP headers, you gain automatic retries, smart caching, failover routing, zero-logging, PCI-DSS protection, and more — with zero code changes to your integration logic.
+
+## How It Works
+
+```
+Your App → MirApi Gateway → Upstream API(s)
+              ↕
+         Auth Check (X-MirApi-Key)
+         PCI-DSS Guard (Luhn Scan)
+         Idempotency Lock (Redis SETNX)
+         Resilience Engine (Retry / Circuit Breaker / Cache / Failover)
+         Header Stripping (X-* headers hidden from upstream)
+```
+
+The gateway intercepts every request, verifies your API key, scans for card data, applies reliability rules, and forwards the request to the upstream API with all internal proxy headers removed.
+
+## Architecture Overview
+
+### Request Lifecycle
+
+Every inbound request passes through this fixed pipeline in order:
+
+1. **Authentication** — The `X-MirApi-Key` header is verified against a Redis cache (SHA-256 hash lookup). If missing or invalid, the request is rejected with `401 Unauthorized` immediately.
+
+2. **PCI-DSS Guard** — The raw request body is scanned for 13–16 digit sequences that pass the Luhn algorithm. If a raw card number is detected, the request is blocked with `400 Bad Request`. The body is **never** written to logs.
+
+3. **Idempotency Check** — The `X-Proxy-Idempotency-Key` header is read. If absent, the gateway auto-computes a key using `SHA256(ClientID + TargetURL + Method + Body)`. The key is locked in Redis for 60 seconds using `SETNX`. Concurrent duplicate requests wait for the first to complete, then receive the same response from memory.
+
+4. **Routing Decision** — The gateway checks for `X-Route-Key` (database-backed cascade route) or `X-Target-URL` (direct proxy). If neither is present, the request is rejected with `400 Bad Request`.
+
+5. **Async Check** — If `X-Webhook-Callback` is present, the job is pushed to a Redis queue and `202 Accepted` is returned immediately. The background worker handles execution with full retry logic.
+
+6. **Resilience Pipeline** — For synchronous requests:
+   - **Circuit Breaker** (`X-Circuit-Breaker: on`): If the circuit is OPEN for the target host, the request is blocked unless a Smart Cache entry exists.
+   - **Retry Loop** (`X-Retry-Count`): Failed requests are retried with exponential backoff + jitter (up to 10 seconds per delay).
+   - **Failover URL** (`X-Failover-URL`): If all retries fail, the request is forwarded to the fallback endpoint.
+   - **Smart Cache** (`X-Smart-Cache`): If the upstream is still failing, the last cached successful response is returned. The response includes `X-Rescued: cache`.
+
+7. **Header Stripping** — Before forwarding to the upstream API, all `X-Target-*`, `X-Retry-*`, `X-MirApi-*`, `X-Proxy-*`, `X-Smart-*`, `X-Failover-*`, `X-Identity-*`, `X-Webhook-*`, `X-Extract-*`, and other internal headers are removed. The upstream never sees proxy orchestration headers.
+
+8. **Secret Injection** — If `X-Identity-Key` is set, its value is injected into the outbound `Authorization` header. If `X-Proxy-Master-Key` is set, the gateway decrypts the matching credential from the database and injects it as `Authorization`.
+
+9. **Response** — The upstream response (headers + body) is returned to your app as-is. If the request was rescued by cache or failover, the header `X-Rescued: <reason>` is added.
+
+## Response Header
+
+When a request is rescued by one of the fallback mechanisms, MirApi adds one response header:
+
+| Header | Values | Description |
+|--------|--------|-------------|
+| `X-Rescued` | `cache`, `failover`, `cascade_fallback` | Indicates how the request was saved. Only present when a rescue occurred. |
+
+> **Note**: MirApi does not add latency, attempt number, or origin headers to every response. All metrics (requests, rescued requests, rescued capital) are recorded internally and visible in the dashboard.
+
+## Supported Use Cases
+
+MirApi Gateway works with **any HTTP API**. Common integrations include:
+
+- **Payment processors**: Stripe, PayPal, Adyen — protect charges from retrying without idempotency
+- **AI/ML providers**: OpenAI, Anthropic, Groq — cascade across providers when rate-limited
+- **Communication**: Twilio, SendGrid — ensure message delivery with retry loops
+- **Banking/Finance**: Plaid, Open Banking APIs — Smart Cache for exchange rates and catalog data
+- **Any REST API**: Just set `X-Target-URL` and add the reliability headers you need
+
+## Next Steps
+
+→ Follow the [Quickstart Guide](/docs/getting-started/quickstart) to make your first resilient request.

@@ -1,0 +1,143 @@
+---
+title: Smart Cache Fallback
+description: Serve the last successful cached response when upstream APIs fail, using MirApi's Smart Cache layer.
+sidebar:
+  order: 3
+---
+
+
+MirApi's Smart Cache stores successful upstream responses in Redis and serves them as emergency fallbacks when the upstream becomes unavailable, rate-limited, or returns errors. This is a **failure rescue mechanism** — not a general-purpose cache. Every request always attempts the upstream first; cached data is only returned when all attempts fail.
+
+## How It Works
+
+1. **First successful request**: MirApi forwards to upstream and, on success, caches the response body in Redis with the configured TTL.
+2. **Subsequent requests**: The request is forwarded to upstream as normal. The cache is **not** served on success — only on failure.
+3. **Upstream failure** (all retries exhausted): MirApi looks for a cache entry. If found, the cached response is returned with `X-Rescued: cache`. If no cache entry exists, the error from upstream is returned.
+
+**Cache key** is computed from: `SHA256(ClientID + TargetURL + Method + RequestBody)` — so different request bodies (e.g., different `currency` values) produce separate cache entries.
+
+## Enable Smart Cache
+
+```bash
+curl https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.exchangerate.host/latest" \
+  -H "X-Smart-Cache: 300s"
+```
+
+**Header:**
+
+| Header | Example Values | Description |
+|--------|---------------|-------------|
+| `X-Smart-Cache` | `60s`, `5m`, `1h` | Cache TTL for successful responses. Accepts Go durations. |
+
+## Use Cases
+
+### 1. Exchange Rate API (Most Common)
+
+Cache exchange rates so your app keeps working when the rates API goes down:
+
+```bash
+# GET current exchange rates — cached for 5 minutes
+curl https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.exchangerate.host/latest?base=USD" \
+  -H "X-Smart-Cache: 300s"
+
+# If the API returns 503 (cached data found):
+# HTTP/1.1 200 OK
+# X-Rescued: cache
+# {"base": "USD", "rates": {"EUR": 0.9234, ...}}
+```
+
+### 2. Product Catalog / Configuration Data
+
+Cache infrequently-changing data from slow backends:
+
+```bash
+curl https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.yourstore.com/v1/products?category=electronics" \
+  -H "X-Smart-Cache: 10m" \
+  -H "X-Retry-Count: 2"
+# Cached for 10 minutes per unique URL+body combination
+```
+
+### 3. AI Embeddings (Expensive + Slow)
+
+Cache embeddings for identical inputs to save cost and time:
+
+```bash
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.openai.com/v1/embeddings" \
+  -H "X-Identity-Key: Bearer sk-proj-..." \
+  -H "X-Smart-Cache: 3600s" \
+  -H "Content-Type: application/json" \
+  -d '{"input": "The quick brown fox", "model": "text-embedding-3-small"}'
+# Same input → same SHA256 body hash → same cache key
+# If OpenAI is down: serves cached embedding from Redis
+```
+
+### 4. Smart Cache + Circuit Breaker
+
+When the circuit opens, the cache is served immediately — no upstream call is made at all:
+
+```bash
+curl https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.exchangerate.host/latest" \
+  -H "X-Circuit-Breaker: on" \
+  -H "X-Smart-Cache: 600s" \
+  -H "X-Retry-Count: 2"
+# Normal: upstream → cache stored in Redis
+# Circuit OPEN: no upstream call → cache served immediately → X-Rescued: cache
+```
+
+### 5. Smart Cache + Retry
+
+The cache is only consulted after all retries are exhausted:
+
+```bash
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.bankapi.com/rates" \
+  -H "X-Smart-Cache: 1h" \
+  -H "X-Retry-Count: 3" \
+  -H "X-Retry-Delay: 500ms"
+# Attempt 1 → 503
+# Attempt 2 → 503 (after 500ms)
+# Attempt 3 → 503 (after 1s)
+# Attempt 4 → 503 (after 2s)
+# All failed → check Redis → cache HIT → serve stale → X-Rescued: cache
+```
+
+## Cache Response Indicator
+
+When a cached response is served, the `X-Rescued: cache` header is added:
+
+```http
+HTTP/1.1 200 OK
+X-Rescued: cache
+Content-Type: application/json
+
+{"base": "USD", "rates": {"EUR": 0.9234, ...}}
+```
+
+If the request succeeds normally (upstream responded), **no** `X-Rescued` header is added.
+
+## Cache Behavior by Request Method
+
+| Method | Caches? | Notes |
+|--------|---------|-------|
+| `GET` | ✅ Yes | Full body cached |
+| `POST` | ✅ Yes | Body hash included in cache key — same body = same cache entry |
+| `PUT` / `PATCH` | ✅ Yes | Same body hash logic as POST |
+| `DELETE` | ⚠️ Use with caution | Same logic, but DELETE responses may not make sense to re-serve |
+
+## Best Practices
+
+- **Always use Smart Cache for read-heavy endpoints** like exchange rates, product catalogs, and configuration APIs — these APIs can go down, and cached data is almost always better than an error.
+- **Combine with `X-Circuit-Breaker: on`** for critical APIs to stop hammering the upstream as soon as it starts failing.
+- **Use appropriate TTLs**: exchange rates → `60s`–`300s`; product catalogs → `5m`–`30m`; embeddings → `1h`–`24h`.
+- **For write operations** (payments, mutations), Smart Cache acts as a last-resort fallback. Ensure idempotency with `X-Proxy-Idempotency-Key` to avoid double-processing stale cached responses.

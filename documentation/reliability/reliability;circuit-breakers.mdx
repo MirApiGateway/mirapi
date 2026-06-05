@@ -1,0 +1,163 @@
+---
+title: Circuit Breakers
+description: Protect your services from cascading failures with MirApi's built-in Redis-backed circuit breaker pattern.
+sidebar:
+  order: 2
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+
+The circuit breaker pattern prevents your application from repeatedly hammering a failing upstream API, allowing it to recover while protecting your request budget and response times.
+
+## How It Works
+
+MirApi tracks failures per target **host** in Redis. The circuit has three states:
+
+```
+CLOSED → (5 failures in 60s) → OPEN → (15s cooldown) → probe request
+                                                              ↓
+                                               success → CLOSED
+                                               failure → OPEN again
+```
+
+- **CLOSED**: Normal operation. All requests pass through.
+- **OPEN**: The upstream has failed 5+ times in the last minute. New requests are **blocked immediately** — no upstream call is made. If Smart Cache is active, the cached response is served. Otherwise, an error is returned.
+- **HALF-OPEN** (implicit): After 15 seconds in OPEN state, the circuit auto-expires from Redis and the next request probes the upstream. If the probe succeeds, the circuit returns to CLOSED. If it fails, it opens again.
+
+## Enable the Circuit Breaker
+
+```bash
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -H "X-Circuit-Breaker: on" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 2000, "currency": "usd", "source": "tok_visa"}'
+```
+
+**Header:**
+
+| Header | Values | Description |
+|--------|--------|-------------|
+| `X-Circuit-Breaker` | `on` or `true` | Enable the circuit breaker for the target host |
+
+## Circuit Breaker Parameters (Fixed)
+
+The circuit breaker uses fixed parameters — they cannot currently be changed per-request:
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| Failure threshold | 5 | Number of failures to open the circuit |
+| Window | 60 seconds | Failure counting window in Redis |
+| Open TTL | 15 seconds | How long the circuit stays OPEN before probing |
+| Scope | Per host | Failures are tracked per target hostname |
+
+## Use Cases
+
+### 1. Basic Circuit Breaker for Payment API
+
+```bash
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -H "X-Identity-Key: Bearer sk_live_..." \
+  -H "X-Circuit-Breaker: on" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 9900, "currency": "usd", "source": "tok_visa"}'
+# If Stripe has had 5+ consecutive failures in the last 60s:
+# → Request is blocked immediately (no upstream call)
+# → Returns 503 Service Unavailable (unless Smart Cache is active)
+```
+
+### 2. Circuit Breaker + Smart Cache (Recommended)
+
+When the circuit is OPEN, serve the last cached response instead of returning an error. This is the most common production pattern:
+
+```bash
+curl https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.exchangerate.host/latest" \
+  -H "X-Circuit-Breaker: on" \
+  -H "X-Smart-Cache: 600s"
+# Normal: fetches rates from upstream, caches in Redis for 10 minutes
+# If circuit opens (upstream is down):
+# → Serves cached rates from Redis
+# → Response includes: X-Rescued: cache
+# → No upstream call is made → no wasted time/money
+```
+
+### 3. Circuit Breaker + Failover URL
+
+When the circuit opens, automatically switch to a backup provider:
+
+```bash
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://primary-bank.com/api/charge" \
+  -H "X-Failover-URL: https://backup-bank.com/api/charge" \
+  -H "X-Circuit-Breaker: on" \
+  -H "X-Retry-Count: 2" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 5000, "currency": "usd"}'
+# primary-bank.com circuit is OPEN → immediately tries backup-bank.com
+# response includes: X-Rescued: failover
+```
+
+### 4. Circuit Breaker + Retry + Cache (Full Resilience Stack)
+
+```bash
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.openai.com/v1/chat/completions" \
+  -H "X-Identity-Key: Bearer sk-proj-..." \
+  -H "X-Circuit-Breaker: on" \
+  -H "X-Retry-Count: 3" \
+  -H "X-Retry-Delay: 500ms" \
+  -H "X-Smart-Cache: 3600s" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello"}]}'
+# Flow on OpenAI outage:
+# 1. Circuit check → CLOSED → proceeds
+# 2. Attempt 1 → 503 → wait 500ms + jitter
+# 3. Attempt 2 → 503 → wait 1s + jitter
+# 4. Attempt 3 → 503 → wait 2s + jitter
+# 5. All retries failed → check Smart Cache → serve last response
+# 6. After 5 total failures → circuit opens → next 15s: no upstream calls
+```
+
+### 5. Circuit Breaker in Async Mode
+
+Circuit breaker is also respected by background workers when using `X-Webhook-Callback`:
+
+```bash
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -H "X-Circuit-Breaker: on" \
+  -H "X-Webhook-Callback: https://your-app.com/webhook" \
+  -H "X-Retry-Count: 5" \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 9900, "currency": "usd"}'
+# Worker checks circuit state before each retry attempt
+# When circuit opens: waits for it to reset before retrying
+```
+
+## Understanding Circuit State Transitions
+
+```
+Request arrives → check Redis key "cb:state:{host}"
+     │
+     ├─ Not found (CLOSED) → attempt upstream
+     │        │
+     │        ├─ Success → del "cb:fails:{host}" → CLOSED
+     │        └─ Failure → INCR "cb:fails:{host}" TTL=60s
+     │                        └─ fails >= 5 → SET "cb:state:{host}" "OPEN" TTL=15s
+     │
+     └─ Found "OPEN" → block request
+              └─ After 15s TTL expires → key gone → CLOSED (next request probes)
+```
+
+<Aside type="tip">
+  Enable circuit breakers on all external API calls in production. Combine with `X-Smart-Cache` to ensure your users always receive a response — even during upstream outages.
+</Aside>
