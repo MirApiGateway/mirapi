@@ -16,7 +16,7 @@ Get your first resilient API call running in **under 5 minutes**.
 
 ## Step 1: Get Your API Key
 
-Sign up at [mirapi.io](https://mirapi.io) and open the dashboard. Create a client group and generate your first API key. Your key will look like:
+Sign up at [mirapi.io](https://mirapi.io) and open the dashboard. Create group and generate your first API key. Your key will look like:
 
 ```bash
 export MIRAPI_KEY="la_5fa62960e7c9af7c***"
@@ -115,8 +115,8 @@ The route `stripe-charges` is configured in your dashboard with the target URL, 
 | `X-Failover-URL` | `https://backup-api.com/v1/charges` | Secondary endpoint if all retries to primary fail |
 | `X-Webhook-Callback` | `https://your-app.com/webhook` | Enable async mode — returns `202 Accepted`, POSTs result to your callback |
 | `X-Proxy-Idempotency-Key` | `order_789_attempt_1` | Custom idempotency key (auto-computed if omitted) |
-| `X-Extract-Redirect` | `$.url \|\| $.checkoutUrl` | Extract a URL from the response body and redirect to it |
-| `X-Extract-Map` | `$.origin=>ip, $.url=>dest` | Extract and rename fields from the response JSON |
+| `X-Extract-Redirect` | `$.url \|\| $.checkoutUrl` | Extracts the first found URL (supports fallback via ||) from a successful 2xx response and performs an HTTP redirect (302 Found) |
+| `X-Extract-Map` | `.id = >charge_id,.status = >data.state` | Restructures the JSON response. Allows mapping multiple fields, creating nested objects, mapping arrays ([]), as well as applying value formatting templates (for example, `id=>$.label(ID: {value})`) |
 | `X-Credential-ID` | `4a2e5d18-...` | Explicit credential UUID for `X-Proxy-Master-Key` lookup |
 
 ## Next Steps

@@ -19,7 +19,7 @@ MirApi records only the following metadata fields for each proxy transaction:
 | `method` | HTTP request method | `POST` |
 | `url` | The targeted upstream endpoint | `https://api.stripe.com/v1/charges` |
 | `status_code` | HTTP response status code from upstream | `200` |
-| `group_id` | Your client group identifier | `grp_5fa629...` |
+| `group_id` | Your group identifier | `grp_5fa629...` |
 | `latency_ms` | Total round-trip processing time | `142ms` |
 | `req_body_size` | Size of the request body in bytes | `142 B` |
 | `resp_body_size` | Size of the response body in bytes | `385 B` |
@@ -75,7 +75,7 @@ If the PCI-DSS guard detects a raw card number in the request body and blocks th
 |-------|-------------|
 | `client_ip` | IP address of the requester |
 | `timestamp` | Unix timestamp of the blocked request |
-| `group_id` | Your client group identifier |
+| `group_id` | Your group identifier |
 
 The flagged request body is **never written** to any storage — not even temporarily. The detection and blocking happens entirely in memory.
 

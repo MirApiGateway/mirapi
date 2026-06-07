@@ -17,6 +17,15 @@ Two headers control response transformation:
 
 Extracts a URL from the upstream response body using a JSONPath expression (or a fallback chain with `||`) and issues a `302 Found` redirect to that URL.
 
+### How It Works
+
+Upon a successful response from the upstream (HTTP status code `2xx`), the proxy analyzes the response body, looking for a value at the specified JSONPath. If a value is found, the proxy interrupts the standard response transmission to the client and instead returns an HTTP redirect `302 Found` pointing to that URL.
+
+- **Fallback chain support**: The expression supports logical OR (`||`). E.g., `X-Extract-Redirect: $.url || $.checkoutUrl || $.data.payment_link`. The proxy will check each path in sequence and redirect to the first one that returns a non-empty value.
+- **Automatic type casting**: If the found node is not a string (for example, a number or a boolean), it will be automatically converted to a string.
+- **Triggers only on 2xx**: If the upstream returns an error (e.g. `400` or `500`), no redirect is executed so that the client can inspect the original upstream error response.
+
+
 ### Syntax Notes
 
 | Feature | Details |
@@ -97,6 +106,24 @@ curl -X POST https://proxy.mirapi.io/ \
 ## `X-Extract-Map`
 
 Response mapping parses the upstream service's response JSON, extracts fields using JSONPath, and constructs a brand-new JSON payload for the client. Only fields explicitly listed in the rules are returned — all other response fields are discarded (whitelist principle).
+
+### How It Works
+
+It intercepts the upstream server's JSON response and transforms its structure before returning it to the client.
+
+### Key Capabilities
+
+- **Multiple Mapping via Comma**: Rename/extract multiple fields at once by separating rules with a comma.
+  - *Example*: `X-Extract-Map: $.id=>charge_id, $.status=>state`
+- **Nested Structures Creation**: The target key (`targetKey`) supports dot-notation to generate nested JSON objects dynamically.
+  - *Example*: `$.id=>data.charge.id` will generate `{"data": {"charge": {"id": "..."}}}`.
+- **Working with Arrays/Lists**: Transform entire arrays of objects using empty brackets `[]`.
+  - *Example*: `provider_data.orders[].order_id=>data.orders[].order`
+- **Value Interpolation**: Format output values by wrapping them in a text template using the syntax `target_key(Template {value})`. You can also reference sibling fields from the same nesting level of the JSON context.
+  - *Example (Value Interpolation)*: `provider_data.order_id=>data.order_text(Order #{value})` transforms ID `123` to `{"data":{"order_text":"Order #123"}}`.
+  - *Example (Cross-field)*: `status=>status_text(Order {order_id} is {value})` will interpolate the `order_id` field from the same level of nesting.
+- **Single Field Fallback (without `=>`)**: If you pass a JSONPath without a target key (e.g. `X-Extract-Map: $.status`), the proxy returns a JSON object with the extracted value in a default key named `extracted`.
+  - *Example*: `{"extracted": "success"}`
 
 ### Syntax Overview
 

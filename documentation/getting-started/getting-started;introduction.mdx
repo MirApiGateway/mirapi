@@ -48,7 +48,7 @@ Every inbound request passes through this fixed pipeline in order:
 
 8. **Secret Injection** — If `X-Identity-Key` is set, its value is injected into the outbound `Authorization` header. If `X-Proxy-Master-Key` is set, the gateway decrypts the matching credential from the database and injects it as `Authorization`.
 
-9. **Response** — The upstream response (headers + body) is returned to your app as-is. If the request was rescued by cache or failover, the header `X-Rescued: <reason>` is added.
+9. **Response** — The upstream response (headers + body) is returned to your app as-is. If the request was rescued by retry, cache, failover, or cascade routing, the header `X-Rescued: <reason>` is added.
 
 ## Response Header
 
@@ -56,7 +56,7 @@ When a request is rescued by one of the fallback mechanisms, MirApi adds one res
 
 | Header | Values | Description |
 |--------|--------|-------------|
-| `X-Rescued` | `cache`, `failover`, `cascade_fallback` | Indicates how the request was saved. Only present when a rescue occurred. |
+| `X-Rescued` | `retry`, `cache`, `failover`, `cascade_fallback` | Indicates how the request was saved. Only present when a rescue occurred. |
 
 > **Note**: MirApi does not add latency, attempt number, or origin headers to every response. All metrics (requests, rescued requests, rescued capital) are recorded internally and visible in the dashboard.
 

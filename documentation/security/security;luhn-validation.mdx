@@ -12,7 +12,7 @@ MirApi Gateway scans every request body for raw credit card numbers using the **
 
 Sending raw card numbers to any API — even to legitimate payment processors — is a serious PCI-DSS compliance violation. A single leaked card number in your logs or a misrouted request can result in regulatory fines and fraud liability. MirApi eliminates this risk at the proxy layer before the request ever leaves your infrastructure.
 
-> **Zero persistence**: The request body is scanned in memory only. Even if a card number is detected and blocked, the body content is never written to logs, disk, or any persistent storage. Only metadata is recorded: client IP, Unix timestamp, and client group ID.
+> **Zero persistence**: The request body is scanned in memory only. Even if a card number is detected and blocked, the body content is never written to logs, disk, or any persistent storage. Only metadata is recorded: client IP, Unix timestamp, and group ID.
 
 ## How It Works
 
@@ -102,6 +102,6 @@ When a card number is detected and blocked, MirApi records the following metadat
 |-------|-------------|
 | `client_ip` | IP address of the requester |
 | `timestamp` | Unix timestamp of the blocked request |
-| `group_id` | Your client group identifier |
+| `group_id` | Your group identifier |
 
 This audit log is visible in the **Security Events** section of your dashboard.

@@ -18,7 +18,7 @@ When an upstream request fails (connection error or `5xx` response), the gateway
 delay = base_delay × 2^attempt + random_jitter (up to 50% of delay)
 ```
 
-Maximum delay is capped at **10 seconds** per attempt. Example with `X-Retry-Delay: 200ms` and `X-Retry-Count: 4`:
+Maximum delay is capped at **10 seconds** per attempt. If one of the retry attempts succeeds, the gateway returns the response to the client along with the diagnostic header `X-Rescued: retry`. Example with `X-Retry-Delay: 200ms` and `X-Retry-Count: 4`:
 
 ```
 Initial attempt:   → fails (e.g. 503)
@@ -36,7 +36,7 @@ Jitter distributes retry load across multiple clients so they don't all hammer t
 |--------|---------|-------------|
 | `X-Retry-Count` | `0` | Number of retry attempts (0 = disabled, max practical: 10) |
 | `X-Retry-Delay` | `100ms` | Base delay for exponential backoff. Accepts Go durations: `100ms`, `500ms`, `1s` |
-| `X-Proxy-Timeout` | `30s` | Per-attempt timeout. Accepts Go durations: `1s`, `5s`, `30s` |
+| `X-Proxy-Timeout` | `30s` | Per-attempt timeout. Accepts Go durations: `1s`, `5s`, `30s`. Maximum value: `30s`. |
 
 ## Use Cases
 

@@ -29,10 +29,21 @@ Rescued responses contain the `X-Rescued` header diagnostic, indicating how the 
 For e-commerce, banking, and payment applications, a failed API request represents lost revenue. The gateway automatically calculates the amount of transaction volume it protects.
 
 ### How it works:
-1. **Body Parsing**: For every incoming request, the gateway inspects the JSON payload for a field named `amount` (case-insensitive).
-2. **Amount Extraction**: If found, it parses the value into a decimal number (supports integers, floats, and numeric strings).
-3. **Trigger**: If the request fails on the first try but is successfully **rescued** by any of the resilience layers, the gateway logs the extracted amount as saved capital.
-4. **Aggregation**: The saved capital is summed over monthly horizons.
+
+1. **Body Parsing & Extraction Rules**:
+   - **Recursive Search**: The gateway recursively traverses the request's JSON payload structure.
+   - **Target Fields**: It searches for the fields `amount`, `sum`, and `total` (case-insensitive).
+   - **Priority Order**: If multiple matching fields exist at the same level of the JSON hierarchy (e.g., both `total` and `amount`), the priority order for extraction is:
+     1. `amount`
+     2. `sum`
+     3. `total`
+   - **Supported Types**: The value can be represented as `float64`, `string`, `int`, or `int64`.
+2. **Trigger**: The extracted amount is credited to **Rescued Capital** *only* if the request is successfully rescued (the internal `rescued` flag becomes `true`). This happens when the initial attempt to the primary upstream fails, but a success response is achieved via one of the gateway's resilience mechanisms:
+   - **Smart Cache**: Served successfully from the cache when the upstream returned a `5xx` error or was unreachable.
+   - **Retry Logic**: Successfully completed after one or more automatic retry attempts (diagnostic header `X-Rescued: retry` added).
+   - **Failover Route**: Rescued by redirecting to a backup `X-Failover-URL`.
+   - **Cascade Route**: Success achieved on a lower-priority or parallel backup host within a configured cascade target list.
+3. **Aggregation**: The saved capital is summed over monthly horizons.
 
 **Example Scenario**:
 1. Your client app makes a payment request: `POST /v1/charges` with body `{"amount": 150.00, "currency": "usd"}`.

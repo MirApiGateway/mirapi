@@ -123,7 +123,7 @@ Optional UUID of the specific credential record to use with `X-Proxy-Master-Key`
 ### `X-Proxy-Timeout`
 Sets the maximum time the gateway will wait for a response from the upstream API per attempt. If the upstream does not respond within this duration, the attempt is considered a failure.
 
-Accepts Go duration strings: `500ms`, `1s`, `5s`, `30s`. Default: `30s`.
+Accepts Go duration strings: `500ms`, `1s`, `5s`, `30s`. Default: `30s`. The maximum value that can be configured is `30s`.
 
 ```bash
 # Tight 2-second timeout — fail fast and retry
@@ -336,7 +336,13 @@ Your callback endpoint receives a `POST` with the upstream response body once th
 ## Response Transformation
 
 ### `X-Extract-Redirect`
-Extracts a URL from the upstream response body using JSONPath and returns a `302 Found` redirect to that URL. Supports fallback chains with `||`.
+Extracts a URL from the upstream response body using JSONPath and returns a `302 Found` redirect to that URL.
+
+- **How it works**: On a successful `2xx` response, the proxy searches the response body for the specified JSONPath. If found, it returns a `302 Found` redirect to the client with the `Location` set to that URL.
+- **Fallback chains**: Supports logical OR (`||`) to try multiple paths (e.g., `$.url || $.checkoutUrl`).
+- **Type casting**: Automatically converts non-string values (numbers/booleans) to strings.
+- **2xx-only**: Does not execute if the upstream returns a non-2xx error code (e.g., `400` or `500`).
+
 
 ```bash
 # Extract payment redirect URL from response
@@ -361,9 +367,12 @@ curl -X POST https://proxy.mirapi.io/ \
 ### `X-Extract-Map`
 Extracts and renames fields from the upstream response body using JSONPath. Returns a transformed JSON object instead of the full upstream response.
 
-Two syntaxes supported:
-- **Single field**: `$.fieldPath` → returns `{"extracted": "value"}`
-- **Multi-field mapping**: `$.path1=>key1, $.path2=>key2` → returns `{"key1": "val1", "key2": "val2"}`
+- **Multiple mapping**: Rename/extract multiple fields at once separated by commas (`$.id=>charge_id, $.status=>state`).
+- **Nested structures**: Target key (`targetKey`) supports dot-notation to generate nested JSON (e.g. `$.id=>data.charge.id` generates `{"data":{"charge":{"id":"..."}}}`).
+- **Arrays**: Transform entire arrays of objects using empty brackets `[]` (e.g. `orders[].id=>data.orders[].order_id`).
+- **Value templates**: Append formatting templates in parentheses (e.g. `$.order_id=>order_text(Order #{value})` or sibling fields: `status=>status_text(Order {order_id} is {value})`).
+- **Single field fallback**: If no target key is specified, returns the extracted value under the key `extracted` (e.g., `$.status` → `{"extracted": "success"}`).
+
 
 ```bash
 # Extract a single field
@@ -399,6 +408,7 @@ MirApi adds one header to responses when a request is rescued:
 
 | Header | Values | When present |
 |--------|--------|-------------|
+| `X-Rescued` | `retry` | Response served successfully after one or more automatic retries |
 | `X-Rescued` | `cache` | Response served from Smart Cache after upstream failure |
 | `X-Rescued` | `failover` | Response served from `X-Failover-URL` after primary failed |
 | `X-Rescued` | `cascade_fallback` | Response served from a lower-priority cascade target |
