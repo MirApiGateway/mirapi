@@ -2,7 +2,7 @@
 
 [![Website](https://img.shields.io/badge/Website-mirapi.io-blue?style=flat-square)](https://mirapi.io)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
-[![Status](https://img.shields.io/badge/Status-Active-brightgreen?style=flat-square)](https://github.com/your-username/mirapi/issues)
+[![Status](https://img.shields.io/badge/Status-Active-brightgreen?style=flat-square)](https://github.com/MirApiGateway/mirapi/issues)
 
 > **The High-Reliability API Proxy Gateway for Lazy but Smart Developers.**  
 > Supercharge your third-party API integrations (Stripe, payment gateways, banking APIs, AI providers) with zero code changes. Simply point your requests to the proxy and use custom HTTP headers to instantly add enterprise-grade reliability.
