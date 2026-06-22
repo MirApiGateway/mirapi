@@ -46,7 +46,7 @@ Every inbound request passes through this fixed pipeline in order:
 
 7. **Header Stripping** — Before forwarding to the upstream API, all `X-Target-*`, `X-Retry-*`, `X-MirApi-*`, `X-Proxy-*`, `X-Smart-*`, `X-Failover-*`, `X-Identity-*`, `X-Webhook-*`, `X-Extract-*`, and other internal headers are removed. The upstream never sees proxy orchestration headers.
 
-8. **Secret Injection** — If `X-Identity-Key` is set, its value is injected into the outbound `Authorization` header. If `X-Proxy-Master-Key` is set, the gateway decrypts the matching credential from the database and injects it as `Authorization`.
+8. **Secret Injection** — If `X-Identity-Key` is set, its value is injected into the outbound `Authorization` header. If `X-Proxy-Master-Key` is set, the gateway decrypts the matching credential from the database and injects it as `Authorization` (or decrypts target-specific credentials for cascade routing targets, applying custom headers/templates).
 
 9. **Response** — The upstream response (headers + body) is returned to your app as-is. If the request was rescued by retry, cache, failover, or cascade routing, the header `X-Rescued: <reason>` is added.
 

@@ -106,6 +106,7 @@ curl -X POST https://proxy.mirapi.io/ \
   -H "X-Retry-Count: 5" \
   -H "X-Retry-Delay: 1s" \
   -H "X-Proxy-Timeout: 10s" \
+  -H "X-Attempt-Timeout: 2s" \
   -H "Content-Type: application/json" \
   -d '{"amount": 9900, "currency": "usd", "source": "tok_visa"}'
 ```
@@ -161,6 +162,7 @@ curl -X POST https://proxy.mirapi.io/ \
   -H "X-Proxy-Idempotency-Key: order_456_cart_789_attempt_1" \
   -H "X-Retry-Count: 3" \
   -H "X-Proxy-Timeout: 15s" \
+  -H "X-Attempt-Timeout: 3s" \
   -H "Content-Type: application/json" \
   -d '{
     "amount": 25000,

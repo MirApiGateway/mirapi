@@ -52,6 +52,7 @@ curl -X POST https://proxy.mirapi.io/ \
   -H "X-Retry-Count: 3" \
   -H "X-Retry-Delay: 100ms" \
   -H "X-Proxy-Timeout: 5s" \
+  -H "X-Attempt-Timeout: 1s" \
   -H "X-Circuit-Breaker: on" \
   -H "X-Smart-Cache: 60s" \
   -H "Content-Type: application/json" \
@@ -63,8 +64,8 @@ What happens step by step:
 2. Body scanned for card numbers (none found → continues)
 3. Idempotency key auto-computed from `SHA256(ClientID + TargetURL + Method + Body)`
 4. Circuit breaker checked for `api.stripe.com` → currently CLOSED → proceeds
-5. Request forwarded to Stripe with a 5-second timeout
-6. If Stripe returns a `5xx` or times out → retry up to 3 times with exponential backoff
+5. Request forwarded to Stripe with an overall 5-second timeout and a 1-second attempt timeout
+6. If Stripe returns a `5xx` or times out (individual attempts capped at 1s) → retry up to 3 times with exponential backoff, within the 5s overall limit
 7. If all retries fail → check Smart Cache for a previous successful response for this exact request
 
 ## Step 4: Verify the Response
@@ -107,9 +108,13 @@ The route `stripe-charges` is configured in your dashboard with the target URL, 
 | `X-Route-Key` | `stripe-charges` | Use a pre-configured dashboard route instead of `X-Target-URL` |
 | `X-Identity-Key` | `Bearer sk_live_...` | Forwarded as the `Authorization` header to the upstream (ephemeral — never stored) |
 | `X-Proxy-Master-Key` | `my-master-passphrase` | Decryption key for database-stored encrypted credentials |
+| `X-Credential-ID` | `4a2e5d18-...` | Explicit credential UUID for `X-Proxy-Master-Key` lookup |
+| `X-Proxy-Auth-Header` | `X-API-Key` | Overrides the destination HTTP header name (default: `Authorization`) |
+| `X-Proxy-Auth-Template` | `Bearer {{secret}}` | Defines the format for the authorization header, replacing `{{secret}}` (default: `Bearer {{secret}}`) |
 | `X-Retry-Count` | `3` | Max retry attempts on `5xx` or connection failure |
 | `X-Retry-Delay` | `100ms` | Base delay for exponential backoff (e.g., `100ms`, `1s`) |
-| `X-Proxy-Timeout` | `5s` | Per-attempt timeout (e.g., `500ms`, `5s`, `30s`) |
+| `X-Proxy-Timeout` | `5s` | Overall request timeout (e.g., `500ms`, `5s`, `30s`) |
+| `X-Attempt-Timeout` | `1s` | Individual attempt timeout (e.g., `200ms`, `1s`, `5s`) |
 | `X-Circuit-Breaker` | `on` | Enable circuit breaker for the target host |
 | `X-Smart-Cache` | `60s` | Cache TTL for successful responses; used as fallback on failure |
 | `X-Failover-URL` | `https://backup-api.com/v1/charges` | Secondary endpoint if all retries to primary fail |
@@ -117,7 +122,6 @@ The route `stripe-charges` is configured in your dashboard with the target URL, 
 | `X-Proxy-Idempotency-Key` | `order_789_attempt_1` | Custom idempotency key (auto-computed if omitted) |
 | `X-Extract-Redirect` | `$.url \|\| $.checkoutUrl` | Extracts the first found URL (supports fallback via ||) from a successful 2xx response and performs an HTTP redirect (302 Found) |
 | `X-Extract-Map` | `.id = >charge_id,.status = >data.state` | Restructures the JSON response. Allows mapping multiple fields, creating nested objects, mapping arrays ([]), as well as applying value formatting templates (for example, `id=>$.label(ID: {value})`) |
-| `X-Credential-ID` | `4a2e5d18-...` | Explicit credential UUID for `X-Proxy-Master-Key` lookup |
 
 ## Next Steps
 

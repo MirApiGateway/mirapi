@@ -1,0 +1,427 @@
+---
+title: Mock Server & Local Testing
+description: Learn how to use the MirApi Mock Server to simulate responses, test asynchronous webhooks locally, and verify payload transformation rules.
+sidebar:
+  order: 4
+---
+
+Integration testing is often one of the most fragile parts of building modern web applications. External sandboxes (e.g., Stripe, Razorpay, Braintree, Paytm) can be slow, rate-limited, or difficult to force into specific failure states (such as 503 Service Unavailable or high latency). 
+
+To solve this, **MirApi Gateway** provides a dedicated, high-performance mock environment and stateless testing utilities at [mock.mirapi.io](https://mock.mirapi.io) to help you build resilient integrations and test edge-case failure modes safely.
+
+---
+
+## 1. Introduction to MirApi Mock Server
+
+The MirApi Mock Server ([https://mock.mirapi.io](https://mock.mirapi.io)) is designed to simulate responses from third-party payment providers and APIs without requiring real API keys, merchant accounts, or production quotas.
+
+### Key Capabilities:
+* **Out-of-the-Box Success & Failure Mocking:** Verify how your application reacts when upstream APIs return HTTP `500 Internal Server Error`, `502 Bad Gateway`, or `503 Service Unavailable` status codes.
+* **Latency Simulation (`delay` parameter):** Introduce artificial delays to trigger and test HTTP client timeouts, retry loops, and circuit breaker transitions.
+* **Flexible Credentials:** The mock server supports credential grouping. You can use authorization keys like `SuperKey1`, `SuperKey2`, or `SuperKey3` to partition state or verify multi-tenant configurations.
+
+---
+
+## 2. OpenAPI Specification
+
+The entire API surface of the mock server is documented using the OpenAPI (Swagger) standard. This allows you to inspect all mock endpoints, request payloads, and response structures interactively.
+
+* 📄 **Direct OpenAPI Spec Link:** [https://mock.mirapi.io/openapi.yaml](https://mock.mirapi.io/openapi.yaml)
+* 🛠️ **Interactive Swagger Editor:** Open [https://editor.swagger.io](https://editor.swagger.io) and import our specification URL to explore and send test requests directly from your browser.
+
+---
+
+## 3. Stateless Webhooks Testing (Request Bin)
+
+Testing asynchronous webhooks (`X-Webhook-Callback`) locally usually requires exposing your local server to the public internet via tools like Ngrok, or sending payloads to public request bins (e.g., webhook.site) which might compromise sensitive tokens.
+
+MirApi provides a private, stateless, in-memory **Request Bin** utility to capture, inspect, and clear webhook callbacks during local development and automated CI/CD testing.
+
+### Webhook Inspection Endpoints:
+
+1. **`POST /webhooks/incoming?id=your-test-id`**  
+   Receives and stores any payload sent by the proxy. Use your own custom, unique `your-test-id` to avoid collisions.
+2. **`GET /webhooks/inspect?id=your-test-id`**  
+   Retrieves all received webhooks for the given ID in chronological order, complete with headers and body payloads.
+3. **`POST /webhooks/clear?id=your-test-id`**  
+   Clears all stored webhooks from memory for the given ID.
+
+---
+
+## 4. PHP Redirect Integration Example
+
+The proxy gateway's **Redirect Extraction** (`X-Extract-Redirect`) feature allows you to extract a checkout or redirect URL from an upstream JSON response (using JSONPath syntax) and instantly issue a `302 Found` redirect to the client. This saves you from writing custom routing logic in your backend.
+
+Below is an interactive PHP script that demonstrates how to implement this flow. You can run this file locally in a PHP-enabled web server (e.g., `php -S localhost:8000`) and initiate the redirect flow with the click of a button.
+
+```php
+<?php
+/**
+ * MirApi Proxy Gateway - Interactive PHP Redirect Extraction Example
+ * 
+ * This script combines a beautiful user interface with PHP cURL logic to test redirect extraction.
+ * You can open this file directly in your browser and click the button to run the test.
+ */
+
+// Check if the redirect action is triggered (GET parameter action=redirect)
+if (isset($_GET['action']) && $_GET['action'] === 'redirect') {
+    $gatewayUrl = 'https://proxy.mirapi.io/'; // Proxy Gateway address
+    $apiKey = 'la_************************************************'; // Masked API Key (replace with your X-MirApi-Key)
+    $mockTargetUrl = 'https://mock.mirapi.io/echo/get/json'; // Target mock endpoint
+
+    $ch = curl_init($gatewayUrl);
+
+    $headers = [
+        'X-MirApi-Key: ' . $apiKey,
+        'X-Target-URL: ' . $mockTargetUrl,
+        
+        // Instruct the proxy to extract $.urlResponse from mock response (which is "https://google.com") and return a 302 redirect
+        'X-Extract-Redirect: $.urlResponse',
+        'Content-Type: application/json'
+    ];
+
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER     => $headers,
+        CURLOPT_HEADER         => true, // Return headers in response to parse Location
+        CURLOPT_FOLLOWLOCATION => false, // Do not automatically follow redirects
+        CURLOPT_TIMEOUT        => 10,
+    ]);
+
+    $response = curl_exec($ch);
+
+    if ($response === false) {
+        die('cURL error: ' . curl_error($ch));
+    }
+
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    $redirectUrl = '';
+
+    // Parse the Location header from proxy response
+    if ($httpCode === 302 || $httpCode === 301) {
+        $lines = explode("\r\n", $response);
+        foreach ($lines as $line) {
+            if (stripos($line, 'Location:') === 0) {
+                $redirectUrl = trim(substr($line, 9));
+                break;
+            }
+        }
+    }
+
+    // Perform final browser redirect if redirect URL was found
+    if (!empty($redirectUrl)) {
+        header("Location: " . $redirectUrl);
+        exit;
+    } else {
+        // Detailed error report page
+        ?>
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <title>Redirect Error</title>
+            <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+            <style>
+                body { font-family: 'Plus Jakarta Sans', sans-serif; background: #020617; color: #f1f5f9; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; padding: 20px; }
+                .card { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(16px); padding: 2.5rem; border-radius: 20px; max-width: 600px; border: 1px solid rgba(255, 255, 255, 0.08); box-shadow: 0 10px 30px -10px rgba(0,0,0,0.5); }
+                h1 { color: #f43f5e; font-size: 1.5rem; margin-top: 0; }
+                pre { background: #090d16; padding: 1.2rem; border-radius: 12px; overflow-x: auto; color: #38bdf8; font-family: monospace; font-size: 0.85rem; border: 1px solid rgba(255,255,255,0.05); }
+                .btn { display: inline-block; background: #3b82f6; color: white; padding: 0.8rem 1.8rem; border-radius: 10px; text-decoration: none; font-weight: 600; margin-top: 1rem; transition: background 0.2s; border: none; cursor: pointer; }
+                .btn:hover { background: #2563eb; }
+            </style>
+        </head>
+        <body>
+            <div class="card">
+                <h1>Redirect Extraction Failed</h1>
+                <p>Proxy returned status <strong><?php echo $httpCode; ?></strong> instead of the expected 302 Found.</p>
+                <p>This may indicate that the proxy server has not been updated to the latest binary version, or the target response could not be parsed successfully.</p>
+                <pre><?php echo htmlspecialchars($response); ?></pre>
+                <a href="php_redirect_example.php" class="btn">Back to Test</a>
+            </div>
+        </body>
+        </html>
+        <?php
+        exit;
+    }
+}
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MirApi PHP Redirect Test</title>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-gradient: linear-gradient(135deg, #0f172a 0%, #020617 100%);
+            --panel-bg: rgba(30, 41, 59, 0.65);
+            --panel-border: rgba(255, 255, 255, 0.08);
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --primary: #3b82f6;
+            --primary-hover: #2563eb;
+            --shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.6);
+        }
+
+        body {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            background: var(--bg-gradient);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+
+        .container {
+            background: var(--panel-bg);
+            backdrop-filter: blur(20px);
+            border: 1px solid var(--panel-border);
+            padding: 3.5rem 2.5rem;
+            border-radius: 24px;
+            max-width: 480px;
+            width: 100%;
+            text-align: center;
+            box-shadow: var(--shadow);
+            animation: fadeIn 0.5s ease-out;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .icon {
+            font-size: 3.5rem;
+            margin-bottom: 1.5rem;
+            display: inline-block;
+            animation: pulse 2.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.08); }
+            100% { transform: scale(1); }
+        }
+
+        h1 {
+            font-size: 1.8rem;
+            font-weight: 700;
+            margin: 0 0 1rem 0;
+            background: linear-gradient(to right, #60a5fa, #a78bfa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        p {
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+            line-height: 1.6;
+            margin: 0 0 2.2rem 0;
+        }
+
+        .card-details {
+            background: rgba(15, 23, 42, 0.45);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            border-radius: 14px;
+            padding: 1.2rem;
+            margin-bottom: 2.2rem;
+            text-align: left;
+            font-size: 0.85rem;
+        }
+
+        .detail-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 0.6rem;
+        }
+        .detail-row:last-child {
+            margin-bottom: 0;
+        }
+        .detail-label {
+            color: var(--text-secondary);
+        }
+        .detail-value {
+            font-family: monospace;
+            color: #38bdf8;
+            font-weight: 500;
+        }
+
+        .btn-action {
+            display: block;
+            width: 100%;
+            background: var(--primary);
+            color: white;
+            padding: 1.1rem 2rem;
+            border-radius: 12px;
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 1rem;
+            border: none;
+            cursor: pointer;
+            box-shadow: 0 4px 18px 0 rgba(59, 130, 246, 0.35);
+            transition: all 0.25s ease-in-out;
+            box-sizing: border-box;
+        }
+
+        .btn-action:hover {
+            background: var(--primary-hover);
+            transform: translateY(-2px);
+            box-shadow: 0 6px 24px 0 rgba(59, 130, 246, 0.45);
+        }
+
+        .btn-action:active {
+            transform: translateY(0);
+        }
+
+        .footer-note {
+            margin-top: 1.8rem;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <span class="icon">⚡</span>
+        <h1>MirApi Redirect Flow</h1>
+        <p>Click the button below to initiate the test. The PHP backend will send a request to the proxy, which will extract the <strong>google.com</strong> link from the mock response and instantly redirect your browser there.</p>
+        
+        <div class="card-details">
+            <div class="detail-row">
+                <span class="detail-label">Proxy Gateway:</span>
+                <span class="detail-value">proxy.mirapi.io</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">Target Upstream:</span>
+                <span class="detail-value">mock.mirapi.io/...</span>
+            </div>
+            <div class="detail-row">
+                <span class="detail-label">JSONPath Header:</span>
+                <span class="detail-value">$.urlResponse</span>
+            </div>
+        </div>
+
+        <a href="?action=redirect" class="btn-action">Execute Redirect</a>
+        
+        <div class="footer-note">
+            Demonstration of X-Extract-Redirect Header
+        </div>
+    </div>
+</body>
+</html>
+```
+
+---
+
+## 5. Body Mapping Demonstration (Dashboard Rules)
+
+You can automatically rename and restructure request payloads at the edge using the **Body Mapping** engine, avoiding the need to write adapter code in your backend services.
+
+### Dashboard Configuration Steps:
+1. Navigate to the MirApi Dashboard and edit your `CascadeURL` route.
+2. Select your target endpoint pointing to `https://mock.mirapi.io/auth2/sameresponse` or `auth2/post`.
+3. In the **Body Map** rules section, add the mapping rules:
+   ```text
+   data.amount=>data.sum, action=>event_type
+   ```
+
+### Request Verification:
+Send a request through cURL to test your configured `CascadeURL` route:
+
+```bash
+curl --location 'https://proxy.mirapi.io/' \
+--header 'X-MirApi-Key: la_************************************************' \
+--header 'X-Route-Key: CascadeURL' \
+--header 'Content-Type: application/json' \
+--data '{
+    "action": "test-webhook",
+    "data": {
+        "amount": 10222
+    }
+}'
+```
+
+### Expected Output:
+Because the mock server echoes back the incoming payload, you will receive a JSON response showing that the fields were automatically transformed by the proxy gateway before hitting the mock upstream:
+
+```json
+{
+    "event_type": "test-webhook",
+    "data": {
+        "sum": 10222
+    }
+}
+```
+
+---
+
+## 6. Response Extraction & Transformation Examples
+
+You can also use request headers to dynamically alter the structure of API responses, or trigger immediate redirection on specific JSON fields.
+
+To test these headers, we will query the mock endpoint `GET https://mock.mirapi.io/echo/get/json`, which returns the following JSON payload:
+
+```json
+{
+  "success": "true",
+  "message": "reqres standard echo response",
+  "urlResponse": "https://google.com",
+  "amount": "100"
+}
+```
+
+### Test 1: Transform Response Structure via `X-Extract-Map`
+
+Extract only `amount` and `message` fields, renaming them to `total` and `info` respectively.
+
+#### cURL Request:
+```bash
+curl -i --location 'https://proxy.mirapi.io/' \
+--header 'X-MirApi-Key: la_************************************************' \
+--header 'X-Target-URL: https://mock.mirapi.io/echo/get/json' \
+--header 'X-Extract-Map: $.amount=>total, $.message=>info'
+```
+
+#### Expected Output:
+The proxy gateway intercepts the mock server response, extracts the fields using JSONPath, filters the response, and yields:
+
+```json
+{
+    "total": "100",
+    "info": "reqres standard echo response"
+}
+```
+
+---
+
+### Test 2: Client Redirection via `X-Extract-Redirect`
+
+Extract the `urlResponse` field containing `https://google.com` and instruct the proxy to issue an immediate `302 Found` redirection.
+
+#### cURL Request:
+*(Omit the `--location` flag to prevent cURL from following the redirect, allowing you to inspect headers).*
+
+```bash
+curl -i 'https://proxy.mirapi.io/' \
+--header 'X-MirApi-Key: la_************************************************' \
+--header 'X-Target-URL: https://mock.mirapi.io/echo/get/json' \
+--header 'X-Extract-Redirect: $.urlResponse'
+```
+
+#### Expected Output:
+The gateway intercepts the response, extracts `https://google.com`, and responds with a `302 Found` redirection pointing to Google:
+
+```http
+HTTP/1.1 302 Found
+Location: https://google.com
+Content-Length: 0
+```

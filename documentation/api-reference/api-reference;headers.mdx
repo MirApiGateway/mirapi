@@ -96,6 +96,8 @@ Your logs show: nothing about the key content
 ### `X-Proxy-Master-Key`
 Decryption passphrase for credentials stored encrypted in the database. The gateway decrypts the matching credential using AES-GCM and injects it as `Authorization` before forwarding.
 
+For cascade routing (`X-Route-Key`), this key is also used at the Edge to decrypt target-specific credentials (`credential_id`) dynamically before forwarding the request to the active target.
+
 ```bash
 # Credential is matched by the host of X-Target-URL (e.g., "api.stripe.com" matches a credential named "stripe")
 curl -X POST https://proxy.mirapi.io/ \
@@ -116,28 +118,70 @@ curl -X POST https://proxy.mirapi.io/ \
 ### `X-Credential-ID`
 Optional UUID of the specific credential record to use with `X-Proxy-Master-Key`. If omitted, the gateway matches the credential by the target hostname substring.
 
+### `X-Proxy-Auth-Header`
+**Optional** (used with `X-Proxy-Master-Key`).
+
+Overrides the target HTTP header name where the decrypted credential is injected. Default is `Authorization`.
+
+```bash
+# Inject decrypted secret into X-API-Key header instead of Authorization
+curl -X POST https://proxy.mirapi.io/v1/messages \
+  -H "X-Target-URL: https://api.anthropic.com/v1/messages" \
+  -H "X-Proxy-Master-Key: my-decryption-passphrase" \
+  -H "X-Proxy-Auth-Header: X-API-Key" \
+  -H "X-Proxy-Auth-Template: {{secret}}"
+```
+
+### `X-Proxy-Auth-Template`
+**Optional** (used with `X-Proxy-Master-Key`).
+
+Defines the format for the injected authorization value, replacing the `{{secret}}` placeholder with the decrypted credential. Default is `Bearer {{secret}}`.
+
+```bash
+# Inject decrypted secret with Basic schema instead of Bearer schema
+curl -X GET https://proxy.mirapi.io/v1/accounts \
+  -H "X-Target-URL: https://api.somebank.com/v1/accounts" \
+  -H "X-Proxy-Master-Key: my-decryption-passphrase" \
+  -H "X-Proxy-Auth-Template: Basic {{secret}}"
+```
+
 ---
 
 ## Resilience
 
 ### `X-Proxy-Timeout`
-Sets the maximum time the gateway will wait for a response from the upstream API per attempt. If the upstream does not respond within this duration, the attempt is considered a failure.
+Strict limit on the total duration of the client's HTTP transaction (including all connection attempts and exponential backoff delays). If the entire execution exceeds this limit, the gateway aborts and responds with a `502 Bad Gateway` (or `504 Gateway Timeout`).
 
-Accepts Go duration strings: `500ms`, `1s`, `5s`, `30s`. Default: `30s`. The maximum value that can be configured is `30s`.
+Accepts Go duration strings: `500ms`, `1s`, `5s`, `30s`. Default: `30s` (capped at maximum 30 seconds).
 
 ```bash
-# Tight 2-second timeout — fail fast and retry
+# Tight 2-second overall timeout with 3 retries
 curl https://proxy.mirapi.io/ \
   -H "X-MirApi-Key: $MIRAPI_KEY" \
   -H "X-Target-URL: https://api.stripe.com/v1/charges" \
   -H "X-Proxy-Timeout: 2s" \
   -H "X-Retry-Count: 3"
 
-# Generous 30-second timeout for a slow upstream
+# Generous 30-second overall timeout for a slow upstream
 curl https://proxy.mirapi.io/ \
   -H "X-MirApi-Key: $MIRAPI_KEY" \
   -H "X-Target-URL: https://api.slowprovider.com/process" \
   -H "X-Proxy-Timeout: 30s"
+```
+
+### `X-Attempt-Timeout`
+Timeout limit applied to each individual connection attempt made to the upstream service. If an individual call exceeds this boundary, it is treated as a failure and triggers the next retry attempt (if retries are configured).
+
+Accepts Go duration strings (e.g., `200ms`, `1s`, `5s`). Default: falls back to the value of `X-Proxy-Timeout` if not specified.
+
+```bash
+# Individual attempt limit of 1s, total execution time cap of 5s
+curl https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: $MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -H "X-Proxy-Timeout: 5s" \
+  -H "X-Attempt-Timeout: 1s" \
+  -H "X-Retry-Count: 3"
 ```
 
 ### `X-Retry-Count`
@@ -149,7 +193,7 @@ Base delay between retries. The gateway uses **exponential backoff with jitter**
 Accepts Go duration strings: `100ms`, `500ms`, `1s`. Default: `100ms`.
 
 ```bash
-# 3 retries, starting at 200ms delay
+# 3 retries, starting at 200ms delay with 1s attempt timeout and 5s overall timeout
 # Attempt 1: wait ~200ms
 # Attempt 2: wait ~400ms + jitter
 # Attempt 3: wait ~800ms + jitter
@@ -159,6 +203,7 @@ curl -X POST https://proxy.mirapi.io/ \
   -H "X-Retry-Count: 3" \
   -H "X-Retry-Delay: 200ms" \
   -H "X-Proxy-Timeout: 5s" \
+  -H "X-Attempt-Timeout: 1s" \
   -d '{"amount": 2000, "currency": "usd", "source": "tok_visa"}'
 
 # Aggressive retry for an unreliable third-party API
@@ -167,7 +212,8 @@ curl https://proxy.mirapi.io/ \
   -H "X-Target-URL: https://api.bankapi.com/transfer" \
   -H "X-Retry-Count: 5" \
   -H "X-Retry-Delay: 500ms" \
-  -H "X-Proxy-Timeout: 10s"
+  -H "X-Proxy-Timeout: 10s" \
+  -H "X-Attempt-Timeout: 2s"
 ```
 
 ### `X-Circuit-Breaker`
@@ -246,6 +292,7 @@ curl -X POST https://proxy.mirapi.io/ \
   -H "X-Failover-URL: https://bank-b.com/api/pay" \
   -H "X-Retry-Count: 2" \
   -H "X-Proxy-Timeout: 5s" \
+  -H "X-Attempt-Timeout: 1.5s" \
   -H "Content-Type: application/json" \
   -d '{"amount": 5000, "currency": "usd"}'
 

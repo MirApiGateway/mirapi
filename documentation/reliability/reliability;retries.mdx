@@ -36,7 +36,8 @@ Jitter distributes retry load across multiple clients so they don't all hammer t
 |--------|---------|-------------|
 | `X-Retry-Count` | `0` | Number of retry attempts (0 = disabled, max practical: 10) |
 | `X-Retry-Delay` | `100ms` | Base delay for exponential backoff. Accepts Go durations: `100ms`, `500ms`, `1s` |
-| `X-Proxy-Timeout` | `30s` | Per-attempt timeout. Accepts Go durations: `1s`, `5s`, `30s`. Maximum value: `30s`. |
+| `X-Proxy-Timeout` | `30s` | Overall Request Timeout. Strict limit on the total HTTP transaction duration. Maximum value: `30s`. |
+| `X-Attempt-Timeout` | *same as proxy timeout* | Attempt Timeout. Timeout limit applied to each individual connection attempt. |
 
 ## Use Cases
 
@@ -52,6 +53,7 @@ curl -X POST https://proxy.mirapi.io/ \
   -H "X-Retry-Count: 3" \
   -H "X-Retry-Delay: 500ms" \
   -H "X-Proxy-Timeout: 5s" \
+  -H "X-Attempt-Timeout: 1s" \
   -H "Content-Type: application/json" \
   -d '{"amount": 2000, "currency": "usd", "source": "tok_visa"}'
 ```
@@ -68,6 +70,7 @@ curl -X POST https://proxy.mirapi.io/ \
   -H "X-Retry-Count: 3" \
   -H "X-Retry-Delay: 1s" \
   -H "X-Proxy-Timeout: 10s" \
+  -H "X-Attempt-Timeout: 2s" \
   -H "X-Proxy-Idempotency-Key: order_789_charge_attempt_1" \
   -H "Content-Type: application/json" \
   -d '{"amount": 9900, "currency": "usd", "source": "tok_visa"}'
@@ -107,6 +110,7 @@ curl -X POST https://proxy.mirapi.io/ \
   -H "X-Retry-Count: 2" \
   -H "X-Retry-Delay: 500ms" \
   -H "X-Proxy-Timeout: 8s" \
+  -H "X-Attempt-Timeout: 2s" \
   -H "Content-Type: application/json" \
   -d '{"amount": 5000, "currency": "usd"}'
 # primary fails × 2 → tries backup bank
@@ -125,6 +129,7 @@ curl -X POST https://proxy.mirapi.io/ \
   -H "X-Retry-Count: 2" \
   -H "X-Retry-Delay: 100ms" \
   -H "X-Proxy-Timeout: 8s" \
+  -H "X-Attempt-Timeout: 2s" \
   -H "Content-Type: application/json" \
   -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello"}]}'
 ```

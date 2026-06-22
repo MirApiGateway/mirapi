@@ -111,6 +111,7 @@ curl -X POST https://proxy.mirapi.io/ \
   -H "X-Retry-Count: 2" \
   -H "X-Retry-Delay: 300ms" \
   -H "X-Proxy-Timeout: 10s" \
+  -H "X-Attempt-Timeout: 2s" \
   -H "Content-Type: application/json" \
   -d '{"amount": 9900, "currency": "usd"}'
 # Target 1 is retried up to 2 times before trying Target 2, etc.
@@ -145,6 +146,61 @@ curl https://proxy.mirapi.io/ \
 # Tries all targets in the route
 # All fail → serves cache → X-Rescued: cache
 ```
+
+## Route Target Authorization (Route Target Auth)
+
+Cascade routing allows you to configure unique authorization settings for each separate upstream service (`target_url`) within a single route.
+
+### Why is this important?
+
+Previously, when forwarding a request along a cascade (e.g., `Stripe ➔ Adyen ➔ Custom Bank`), the proxy attempted to use a single shared authorization header for all services. This limited the utility of cascades, as different payment gateways and APIs require different formats of authentication.
+
+Now, you can securely bind each service in the cascade to its own credentials from the database, specifying a custom HTTP header name and key interpolation template for each target.
+
+---
+
+### How to Configure (Example)
+
+Imagine a cascade route `payment-cascade`. If the primary gateway (Stripe) returns an error, the request is automatically routed to the backup gateway (Custom Bank API). Each has its own authorization format.
+
+Here is an example JSON payload to create or update this route:
+
+```json
+{
+  "route_key": "payment-cascade",
+  "strategy": "priority",
+  "targets": [
+    {
+      "priority": 1,
+      "target_url": "https://api.stripe.com/v1/charges",
+      "timeout_ms": 10000,
+      "credential_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+      "auth_header": "Authorization",
+      "auth_template": "Bearer {{secret}}"
+    },
+    {
+      "priority": 2,
+      "target_url": "https://api.custombank.com/v1/payments",
+      "timeout_ms": 15000,
+      "credential_id": "c3098522-8356-4c91-9e2c-29ad9c42c943",
+      "auth_header": "X-Bank-Token",
+      "auth_template": "{{secret}}"
+    }
+  ]
+}
+```
+
+### Parameter Details:
+
+- `credential_id` (optional): The UUID of the encrypted credentials in your Credentials vault. If omitted or left empty (`null` / `""`), the request to this target is sent without authorization (or with the client's original headers).
+- `auth_header` (default: `Authorization`): The name of the HTTP header where the proxy will insert the key.
+- `auth_template` (default: `Bearer {{secret}}`): The formatting template. The proxy will automatically decrypt the token using your `X-Proxy-Master-Key` and replace the `{{secret}}` placeholder with the real decrypted key.
+
+### Edge-Level Security
+
+All credentials (`credential_id`) are stored in the database encrypted using the AES-GCM algorithm. Decryption occurs strictly in-memory at request execution time using the `X-Proxy-Master-Key` passed by the client in the request headers. Decryption keys are never stored on our disks.
+
+---
 
 ## Target Request Body Mapping
 
