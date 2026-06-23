@@ -9,90 +9,117 @@
 
 ---
 
-## 🎯 What is MirApi?
-
-**MirApi** is an ultra-low latency, high-performance API proxy gateway written in Go. It sits between your application and upstream services (like Stripe, OpenAI, or banking APIs). By changing only the base URL of your API requests and injecting custom headers, you gain immediate access to advanced resilience, security, routing, and caching patterns.
-
-### ⚡ Key Latency Overhead
-* Internal processing latency: **< 2ms** per request.
-* Built with a non-blocking asynchronous architecture using Go's native standard library and high-speed Redis caching.
-
----
-
-## 🚀 Key Features
-
-### 1. 🛡️ PCI-DSS Pre-Validation (Hard Stop)
-Protects your infrastructure from heavy compliance liabilities. The gateway scans raw incoming JSON request bodies for 13-16 digit card numbers. If detected, it applies the **Luhn Algorithm** check and immediately blocks the request.
-* *Result:* Clear-text card data never touches your persistent logs or backend servers.
-
-### 2. 🔁 Automatic Retries & Jitter
-Prevents transient network failures from breaking your application. Automatically retries failing upstream requests (`>= 500` HTTP statuses or network dropouts) using **Exponential Backoff** and randomized **Jitter** to avoid hammering target servers.
-
-### 3. 🧠 Smart Cache (Zero-Downtime Failover)
-If an upstream service goes offline or returns a `5xx` error, MirApi intercepts the failure and instantly returns the latest cached successful response from Redis.
-
-### 4. 🔀 Database-Backed Cascade Routing & Failover
-Define primary and fallback endpoints.
-* **Priority Strategy:** Sequentially tries endpoints. If the primary target fails or times out, the proxy silently routes the request to a secondary provider.
-* **Race Strategy:** Concurrently fires requests to multiple endpoints and resolves using the fastest successful responder, canceling all other pending requests.
-
-### 5. ⚡ Asynchronous Webhooks (Queue Mode)
-Instantly releases your client application threads by returning a `202 Accepted` status. MirApi queues the execution in a high-capacity Redis worker pool, safely executes the request (retrying for hours if needed), and posts the result back to your webhook URL.
-
-### 6. 🔒 Secret Offloading
-Keep API credentials off your application servers. MirApi can decrypt target credentials on the fly using a master passphrase passed in the headers, or read them from secure ephemeral memory loops.
+## 🎁 Free Forever Tier (No Card Required)
+To help you build, test, and run production workloads risk-free, MirApi offers a **Free Forever Plan**:
+* **10,000 free requests per month** (resets monthly).
+* **No credit card required** to sign up.
+* Hosted on our high-performance **Singapore Node** yielding **< 2ms** internal processing latency.
+* Register in 10 seconds at [mirapi.io](https://mirapi.io) and start testing immediately using our public **Mock Server** at `https://mock.mirapi.io`.
 
 ---
 
-## 💼 Where Can I Apply MirApi?
+## 🎯 Production Use Cases & Solutions
 
-* **Payment Flow Resilience:** Prevent lost sales when Stripe, Braintree, or PayPal experience temporary outages.
-* **LLM API Redundancy:** Automatically failover to a backup LLM provider (e.g., Anthropic to OpenAI) if rate limits or outages occur.
-* **Legacy API Modernization:** Inject modern API features (idempotency, custom timeout limits, payload mapping, caching) into older services without rewriting their code.
-* **Compliance Safeguarding:** Ensure developers or staging environments do not accidentally send clear-text credit cards to third-party endpoints.
+### 1. India: UPI Failover & Cascade Routing (`X-Route-Key`)
+* **The Problem:** Unified Payments Interface (UPI) gateways in India (like Razorpay, Paytm) frequently face bank-side timeouts, causing dropped checkouts and lost revenue.
+* **The Solution:** Define a database-backed cascade route. If the primary gateway fails to respond within a tight execution limit (e.g. `X-Attempt-Timeout: 2000ms`), MirApi silently and automatically cascades (`priority` or concurrent `race` strategies) to a backup gateway like Cashfree or Paytm. Zero changes to your backend application logic.
+
+### 2. Shopify: Webhook Delivery Queue & Field Mapping (`X-Webhook-Callback`)
+* **The Problem:** Shopify webhooks are dropped if your CRM/ERP system is down. In addition, Shopify sends a standard payload, while your destination API might require a different structure, forcing you to write and maintain custom middleware.
+* **The Solution:**
+  * Route Shopify webhooks through MirApi using `X-Webhook-Callback: https://your-erp.com/orders`.
+  * Transform raw Shopify JSON schemas at the edge using `X-Extract-Map` rules (e.g. mapping `$.id=>order_id`) to fit your destination API structure.
+  * If your ERP goes down, MirApi queues the webhook in a Redis-backed queue and retries delivery automatically for up to 24 hours.
 
 ---
 
-## 🛠️ Minimal Examples
+## 🛠️ Quick Start & Integration Examples
 
-Integrating MirApi requires **no SDKs**. Just change the base URL to your MirApi gateway and inject the required headers.
+Integrating MirApi requires **no SDKs**. Simply redirect your API endpoint through our gateway (`https://proxy.mirapi.io/`) and append custom orchestration headers.
 
-### 1. Basic Proxying with Automatic Retries
-Forward a request to httpbin (acting as your target API) and retry up to 3 times with exponential delays if it fails.
+### 1. Basic Routing with Auto-Retries & Jitter
+Forward requests to your target API and automatically retry up to 5 times using **Exponential Backoff and Jitter** in case of upstream errors (HTTP `5xx` or timeouts).
 
 ```bash
 curl -X POST https://proxy.mirapi.io/ \
-  -H "X-MirApi-Key: your_mirapi_client_key" \
-  -H "X-Target-URL: https://httpbin.org/post" \
-  -H "X-Retry-Count: 3" \
-  -H "X-Retry-Delay: 200ms" \
-  -H "Content-Type: application/json" \
-  -d '{"status": "resilient"}'
-```
-
-### 2. Smart Cache Rescue
-Enable 5 minutes of caching. If the upstream server suddenly goes down, MirApi will serve the cached successful response.
-
-```bash
-curl -X POST https://proxy.mirapi.io/ \
-  -H "X-MirApi-Key: your_mirapi_client_key" \
+  -H "X-MirApi-Key: YOUR_MIRAPI_KEY" \
   -H "X-Target-URL: https://api.stripe.com/v1/charges" \
-  -H "X-Smart-Cache: 5m" \
+  -H "X-Retry-Count: 5" \
+  -H "X-Retry-Delay: 300ms" \
   -H "Content-Type: application/json" \
-  -d '{"amount": 2000, "currency": "usd"}'
+  -d '{"amount": 1000, "currency": "usd"}'
 ```
 
-### 3. Asynchronous Execution via Webhooks
-Offload a long-running upstream call. MirApi immediately returns `202 Accepted` and processes the request in the background.
+### 2. Smart Cache (Fallback Caching on Outage)
+If the upstream target system collapses or returns a catastrophic `5xx` server error, MirApi will intercept the error and serve the newest stable cached response from memory.
+
+```bash
+curl -X GET https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: YOUR_MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.weatherapi.com/v1/current.json?q=Singapore" \
+  -H "X-Smart-Cache: 300s"
+```
+
+### 3. Asynchronous Webhooks Execution
+Release client threads instantly with a `202 Accepted` packet. MirApi handles background execution via worker queues and pushes the resulting body to your webhook receiver.
 
 ```bash
 curl -X POST https://proxy.mirapi.io/ \
-  -H "X-MirApi-Key: your_mirapi_client_key" \
-  -H "X-Target-URL: https://httpbin.org/delay/10" \
-  -H "X-Webhook-Callback: https://your-server.com/webhooks/mirapi" \
+  -H "X-MirApi-Key: YOUR_MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.openai.com/v1/chat/completions" \
+  -H "X-Webhook-Callback: https://your-app.com/webhooks/openai" \
   -H "Content-Type: application/json" \
-  -d '{"task": "background-process"}'
+  -d '{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello!"}]}'
 ```
+
+### 4. PCI-DSS Compliance (Hard Card Data Blocker)
+Prevent accidental raw card data leaks. MirApi validates all incoming request bodies using the **Luhn Algorithm**. If raw card numbers are detected, the request is blocked immediately at the edge.
+
+```bash
+# This request gets blocked:
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: YOUR_MIRAPI_KEY" \
+  -H "X-Target-URL: https://api.stripe.com/v1/charges" \
+  -H "Content-Type: application/json" \
+  -d '{"card_number": "4111111111111111"}'
+```
+
+* **Response Status:** `400 Bad Request`
+* **Response Body:** `"Error: Clear-text payment data detected. Please use tokenization (Stripe/Braintree tokens) instead of raw card numbers."`
+
+---
+
+## 🧪 Testing with the Public Mock Server
+
+We host a public mock server at `https://mock.mirapi.io` specifically for testing and playground verification. You can route proxy requests through MirApi to simulate various success and failure targets instantly.
+
+### Mock Endpoints Available:
+
+| Upstream Path | Behavior & Test Scenario |
+| :--- | :--- |
+| `GET/POST https://mock.mirapi.io/post` | Mirrors input JSON payload back to you (Standard POST, Payload Mapping). |
+| `GET https://mock.mirapi.io/delay/:seconds` | Intentionally delays response to test timeouts (e.g. `X-Attempt-Timeout`). |
+| `GET https://mock.mirapi.io/status/:code` | Returns the specified HTTP status code (e.g., `502`, `503` to test Retries & Failovers). |
+| `GET https://mock.mirapi.io/random` | Returns a randomized `200 OK` or `502 Bad Gateway` (perfect for testing retry loops). |
+
+### Test Example: Auto-Retry Loop with Mock Server
+Test the retry behavior safely. The proxy will catch the mock server's `502` status errors and automatically retry until it gets a successful response:
+
+```bash
+curl -X POST https://proxy.mirapi.io/ \
+  -H "X-MirApi-Key: YOUR_MIRAPI_KEY" \
+  -H "X-Target-URL: https://mock.mirapi.io/random" \
+  -H "X-Retry-Count: 4" \
+  -H "X-Retry-Delay: 200ms"
+```
+
+---
+
+## 🔒 Security & Secrets Offloading
+
+Keep API keys out of configuration files and frontend code:
+* **Ephemeral Storage (`X-Identity-Key`):** API keys are read directly into memory loops, leveraged during processing runtime, and scrubbed clean without logging.
+* **Encrypted Storage (`X-Proxy-Master-Key`):** Decrypt database-secured API credentials dynamically at the edge using the cryptographic passphrase sent in this header.
 
 ---
 
@@ -104,7 +131,7 @@ We want to make third-party integrations as reliable as possible!
 * **Have a feature request?** Feel free to submit an issue outlining your proposal.
 * **Questions or Suggestions?** Join the discussion in the issues tracker.
 
-Go to the [Issues](https://github.com/your-username/mirapi/issues) section to submit your feedback.
+Go to the [Issues](https://github.com/MirApiGateway/mirapi/issues) section to submit your feedback.
 
 ---
 
