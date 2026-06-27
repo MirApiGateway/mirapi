@@ -173,7 +173,19 @@ curl -X POST https://proxy.mirapi.io/ \
 
 # Step 2: Your app responds to the user immediately ("Processing payment...")
 
-# Step 3: MirApi worker calls Stripe, retries if needed
-# Step 4: Stripe succeeds → MirApi POSTs to https://myshop.com/api/payments/confirm
-# Step 5: Your handler marks the order as paid
+# Step 4: MirApi worker calls Stripe, retries if needed
+# Step 5: Stripe succeeds → MirApi POSTs to https://myshop.com/api/payments/confirm
+# Step 6: Your handler marks the order as paid
 ```
+
+## Using Async Mode with Third-Party Webhook Producers (Shopify, GitHub, Stripe)
+
+Many platforms that fire webhooks — Shopify Admin, GitHub Actions, Stripe — only let you enter a **destination URL**. They do not allow custom HTTP headers.
+
+For these scenarios, MirApi supports passing all configuration as **URL query parameters** instead of headers. For example, to configure Shopify to queue orders with 10 retries:
+
+```
+https://proxy.mirapi.io/v1/webhook?mirapi_key=your_api_key&callback=https%3A%2F%2Fmy-erp.com%2Fapi%2Forders&retries=10&delay=1s&timeout=5s
+```
+
+See the full guide, mapping table, and step-by-step Shopify integration in: [URL Query Parameter Configuration](/api-reference/query-params)

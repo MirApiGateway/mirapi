@@ -27,7 +27,7 @@ To help you build, test, and run production workloads risk-free, MirApi offers a
 ### 2. Shopify: Webhook Delivery Queue & Field Mapping (`X-Webhook-Callback`)
 * **The Problem:** Shopify webhooks are dropped if your CRM/ERP system is down. In addition, Shopify sends a standard payload, while your destination API might require a different structure, forcing you to write and maintain custom middleware.
 * **The Solution:**
-  * Route Shopify webhooks through MirApi using URL query parameters (since Shopify does not support custom headers): `https://proxy.mirapi.io/v1/webhook?mirapi_key=YOUR_KEY&callback=https://your-erp.com/orders&retries=5`.
+  * Route Shopify webhooks through MirApi using URL query parameters (since Shopify does not support custom headers): `https://proxy.mirapi.io/v1/webhook?mirapi_key=YOUR_KEY&callback=https%3A%2F%2Fyour-erp.com%2Forders&retries=5`.
   * Transform raw Shopify JSON schemas at the edge using `X-Extract-Map` rules (e.g. mapping `$.id=>order_id`) or Cascading DB routes to fit your destination API structure.
   * If your ERP goes down, MirApi queues the webhook in a Redis-backed queue and retries delivery automatically for up to 24 hours.
 
@@ -99,6 +99,8 @@ curl -X POST "https://proxy.mirapi.io/v1/webhook?mirapi_key=YOUR_API_KEY&callbac
   -H "Content-Type: application/json" \
   -d '{"event": "order_created"}'
 ```
+
+For more details on query parameter mapping and examples, see the [URL Query Parameter Configuration Guide](documentation/api-reference/api-reference;query-params.mdx).
 
 ---
 

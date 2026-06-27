@@ -1,0 +1,211 @@
+---
+title: URL Query Parameter Configuration
+description: Configure MirApi Gateway routing, resilience, and security entirely via URL query parameters — no custom HTTP headers required. Ideal for Shopify, GitHub, Stripe, and other webhook producers.
+sidebar:
+  order: 3
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+Every MirApi control header has an equivalent **URL query parameter alias**. This lets you configure the full power of the gateway — retries, caching, cascades, async webhooks — directly in the URL, without setting any custom HTTP headers.
+
+This feature is designed for **third-party webhook producers** (Shopify, GitHub, Stripe, CRM platforms) that only accept a single URL field and do not allow custom header injection.
+
+---
+
+## Why Query Parameters?
+
+Historically, MirApi was configured exclusively through custom `X-*` HTTP headers. This works perfectly when your own code makes the request. But many platforms that fire webhooks — Shopify Admin, GitHub Actions, Stripe Events, HubSpot, Salesforce — only let you enter a **destination URL**. They send their own fixed headers and give you no way to add custom ones.
+
+**Query Parameter Fallback Mapping** solves this: every routing, resilience, and security header can be passed directly as a GET query parameter appended to your MirApi webhook URL.
+
+---
+
+## Core Rules
+
+<Aside type="caution">
+  **Header Precedence:** HTTP headers **always take priority** over query parameters. If both `X-Target-URL` (header) and `target` (query parameter) are present in the same request, the gateway uses the header value and ignores the query parameter. This means you can safely mix both in hybrid environments — headers always win.
+</Aside>
+
+<Aside type="danger">
+  **URL Encoding is mandatory.** Any URL passed inside a query parameter (target endpoints, callback URLs) **must be URL-encoded**. Replace `https://` with `https%3A%2F%2F` and `/` with `%2F`. Failing to encode will cause the gateway to misparse the nested URL and reject the request with `400 Bad Request`.
+
+  Use a tool like `encodeURIComponent()` in JavaScript or `urllib.parse.quote()` in Python.
+</Aside>
+
+<Aside type="tip">
+  **Duration Strings:** All timeout and delay parameters accept standard **Go duration strings**: `200ms`, `5s`, `1m`, `1h30m`. Plain integers are invalid — use `5s`, not `5`.
+</Aside>
+
+---
+
+## Complete Header → Query Parameter Mapping
+
+| HTTP Header | Query Parameter Alias(es) | Description |
+| :--- | :--- | :--- |
+| `X-MirApi-Key` | `mirapi_key` or `apiKey` | Authentication token for MirApi. **Required on every request.** |
+| `X-Target-URL` | `target_url` or `target` | The destination API endpoint where the request is routed. Must be URL-encoded. |
+| `X-Route-Key` | `route_key` or `route` | Selects a pre-configured cascade route from your dashboard. |
+| `X-Webhook-Callback` | `webhook_callback` or `callback` | Enables async queueing mode. Defines the callback endpoint. Must be URL-encoded. |
+| `X-Failover-URL` | `failover_url` | Primary fallback endpoint if the target fails after all retries. Must be URL-encoded. |
+| `X-Proxy-Timeout` | `proxy_timeout` or `timeout` | Overall request timeout (e.g., `10s`). Caps the entire execution including all retry delays. |
+| `X-Attempt-Timeout` | `attempt_timeout` | Per-attempt timeout (e.g., `2s`). If a single call exceeds this, it is treated as a failure and retried. |
+| `X-Retry-Count` | `retry_count` or `retries` | Maximum number of retry attempts on `5xx` or connection failure. |
+| `X-Retry-Delay` | `retry_delay` or `delay` | Initial backoff delay for exponential retry (e.g., `100ms`). Each retry doubles the delay plus jitter. |
+| `X-Circuit-Breaker` | `circuit_breaker` or `cb` | Enables circuit breaker for the target host. Accepts `on` or `true`. |
+| `X-Smart-Cache` | `smart_cache` or `cache` | Caches the last successful response and serves it if the upstream fails (e.g., `60s`). |
+| `X-Extract-Map` | `extract_map` or `map` | Extracts and renames fields from the upstream JSON response (e.g., `$.id=>new_id`). |
+| `X-Extract-Redirect` | `extract_redirect` or `redirect` | Extracts a redirect URL from the upstream JSON response and returns a `302 Found`. |
+
+---
+
+## Examples
+
+### Example 1 — Shopify Async Webhook Queueing
+
+Shopify fires webhooks when orders are placed. If your ERP or CRM is temporarily down, Shopify will mark your endpoint as failed and may deactivate it after enough failures.
+
+Using MirApi's async webhook mode, configure a MirApi URL as the Shopify destination. MirApi immediately returns `202 Accepted` to Shopify (preventing deactivation), stores the payload in a Redis-backed worker queue, and delivers it to your ERP with automatic retries.
+
+**Shopify Webhook URL:**
+```
+https://proxy.mirapi.io/v1/webhook?mirapi_key=your_api_key&callback=https%3A%2F%2Fmy-erp.com%2Fapi%2Forders&retries=10&delay=1s&timeout=5s
+```
+
+**Parameter breakdown:**
+
+| Parameter | Value | Equivalent Header |
+| :--- | :--- | :--- |
+| `mirapi_key` | `your_api_key` | `X-MirApi-Key` |
+| `callback` | `https%3A%2F%2Fmy-erp.com%2Fapi%2Forders` | `X-Webhook-Callback` |
+| `retries` | `10` | `X-Retry-Count` |
+| `delay` | `1s` | `X-Retry-Delay` |
+| `timeout` | `5s` | `X-Proxy-Timeout` |
+
+**What happens:**
+1. Shopify `POST`s to the MirApi URL with the order payload.
+2. MirApi verifies `mirapi_key` and immediately returns `202 Accepted` to Shopify.
+3. The payload is pushed to a Redis worker queue.
+4. The worker attempts `POST https://my-erp.com/api/orders` with up to 10 retries, starting at 1-second delay with exponential backoff (capped at 5s per attempt).
+5. On success, the job is marked complete. On total failure, your callback endpoint receives an error payload.
+
+---
+
+### Example 2 — Synchronous Proxying with Smart Caching
+
+Use this when fetching data from a third-party API with automatic retries and a cache that serves the last known good response if the upstream goes down.
+
+```http
+GET https://proxy.mirapi.io/v1/proxy?mirapi_key=your_api_key&target=https%3A%2F%2Fapi.external-service.com%2Fv1%2Fproducts&retries=3&cache=60s HTTP/1.1
+```
+
+**What happens:**
+1. MirApi forwards the `GET` to `https://api.external-service.com/v1/products`.
+2. On success, the response is cached for 60 seconds and returned to you.
+3. If the upstream returns `5xx` or times out, MirApi retries up to 3 times with exponential backoff.
+4. If all retries fail, MirApi serves the last cached successful response (if available). The response includes `X-Rescued: cache`.
+
+---
+
+### Example 3 — Dashboard Cascade Route via Webhook URL
+
+If you have a complex multi-target cascade with request body mapping pre-configured in your MirApi dashboard, reference it with a single `route` parameter.
+
+**Shopify Webhook URL:**
+```
+https://proxy.mirapi.io/v1/webhook?mirapi_key=your_api_key&route=shopify_to_crm
+```
+
+This instructs the gateway to look up the `shopify_to_crm` route from your account, which may include:
+- Multiple cascade targets (e.g., Salesforce → HubSpot → Pipedrive)
+- Request body field aliasing (e.g., `line_items => order_lines`)
+- Per-target timeouts and failover strategy
+
+No need to repeat target URLs, timeouts, or mapping rules in every URL.
+
+---
+
+## Step-by-Step: Shopify Webhook Integration
+
+Configure Shopify to deliver `orders/create` events to your ERP through MirApi, with async queuing and retry protection.
+
+<Steps>
+
+1. **Get your MirApi API Key**
+
+   Log in to [mirapi.io](https://mirapi.io), open your dashboard, and copy your API key. It will look like `la_5fa62960e7c9af7c***`.
+
+2. **Identify your ERP webhook endpoint**
+
+   This is the URL where Shopify order payloads should ultimately be delivered. For example:
+   ```
+   https://my-erp.com/api/orders/shopify
+   ```
+
+3. **URL-encode your ERP endpoint**
+
+   URL-encode the ERP URL before embedding it in the query string:
+
+   ```
+   Input:  https://my-erp.com/api/orders/shopify
+   Output: https%3A%2F%2Fmy-erp.com%2Fapi%2Forders%2Fshopify
+   ```
+
+   Quick reference in your language of choice:
+   - **JavaScript:** `encodeURIComponent('https://my-erp.com/api/orders/shopify')`
+   - **Python:** `urllib.parse.quote('https://my-erp.com/api/orders/shopify', safe='')`
+   - **Go:** `url.QueryEscape("https://my-erp.com/api/orders/shopify")`
+
+4. **Build your MirApi webhook URL**
+
+   Assemble the final URL with your resilience parameters:
+
+   ```
+   https://proxy.mirapi.io/v1/webhook?mirapi_key=la_5fa62960e7c9af7c***&callback=https%3A%2F%2Fmy-erp.com%2Fapi%2Forders%2Fshopify&retries=10&delay=1s&timeout=5s&cb=on
+   ```
+
+   Parameters used:
+
+   | Parameter | Value | Effect |
+   | :--- | :--- | :--- |
+   | `mirapi_key` | `la_5fa62960e7c9af7c***` | Authenticates the request |
+   | `callback` | `https%3A%2F%2F...` | ERP delivery endpoint (URL-encoded) |
+   | `retries` | `10` | Up to 10 retry attempts if ERP is unreachable |
+   | `delay` | `1s` | 1s initial backoff, doubles each attempt |
+   | `timeout` | `5s` | Each delivery attempt times out after 5s |
+   | `cb` | `on` | Enables circuit breaker on the ERP host |
+
+5. **Configure in Shopify Admin**
+
+   Navigate to **Settings → Notifications → Webhooks** and create a new webhook:
+   - **Event:** `Order creation`
+   - **Format:** `JSON`
+   - **URL:** *(paste your MirApi URL from Step 4)*
+
+6. **Verify in your MirApi dashboard**
+
+   Create a test order in Shopify. In your MirApi dashboard, open the **Webhook Queue** tab to find the incoming job. The job panel shows:
+   - Delivery attempts with timestamps
+   - HTTP status code per attempt
+   - Final delivery status and any error payload
+
+</Steps>
+
+<Aside type="tip">
+  **Need payload remapping?** If your ERP expects a different JSON structure than Shopify sends (e.g., `line_items` → `items`), configure a dashboard route with body aliasing rules and switch to `route=shopify_to_erp` instead of `callback=...`. The gateway remaps the payload automatically before each delivery attempt.
+</Aside>
+
+---
+
+## Security Considerations
+
+**API Key in URL**  
+Query parameters, including `mirapi_key`, appear in server access logs and may be captured in browser history or third-party analytics. Treat the webhook URL as a secret. Rotate your API key immediately if you suspect the URL has been exposed.
+
+**Always use HTTPS**  
+Only use `https://proxy.mirapi.io/...`. Query parameters transmitted over plain HTTP are visible in transit.
+
+**Callback Endpoint Verification**  
+To confirm that callbacks arriving at your ERP are genuinely from MirApi and not spoofed, use either:
+- **IP allowlisting:** Restrict inbound requests to MirApi's published egress IP ranges.
+- **Secret path token:** Embed a secret token in your callback URL path (e.g., `/api/orders/shopify/s3cr3t-token`) that only MirApi knows.

@@ -1,10 +1,15 @@
 ---
 title: Headers Reference Guide
-description: Complete reference for all MirApi Gateway X-* control headers, their types, defaults, and examples.
+description: Complete reference for all MirApi Gateway X-* control headers, their types, defaults, and examples. Every header also has a URL query parameter alias.
 sidebar:
   order: 1
 ---
 
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="tip">
+  Every header listed on this page has a **URL query parameter equivalent**. If you are configuring a third-party webhook producer (Shopify, GitHub, Stripe) that does not allow custom headers, see the [URL Query Parameter Configuration](/api-reference/query-params) guide.
+</Aside>
 
 Complete reference for all `X-*` control headers supported by MirApi Gateway. These headers are read by the gateway on every request and stripped before forwarding to the upstream API — so the upstream never sees them.
 

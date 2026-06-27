@@ -27,8 +27,8 @@
 ### 2. Shopify: Доставка вебхуків та кастомний мапінг полів (`X-Webhook-Callback`)
 * **Проблема:** Вебхуки Shopify втрачаються, якщо ваша CRM/ERP-система тимчасово не працює. Крім того, Shopify надсилає стандартний формат JSON, тоді як цільове API часто вимагає кастомної структури, що змушує писати окремий middleware.
 * **Рішення:**
-  * Спрямуйте вебхуки Shopify через MirApi із використанням заголовка `X-Webhook-Callback: https://your-erp.com/orders`.
-  * Трансформуйте вхідний JSON-запит під потрібну структуру на льоту на рівні проксі за допомогою правил `X-Extract-Map` (наприклад, мапінг `$.id=>order_id`), щоб пристосувати його до цільового API.
+  * Спрямуйте вебхуки Shopify через MirApi за допомогою параметрів URL-запиту (оскільки Shopify не підтримує кастомні заголовки): `https://proxy.mirapi.io/v1/webhook?mirapi_key=YOUR_KEY&callback=https%3A%2F%2Fyour-erp.com%2Forders&retries=5`.
+  * Трансформуйте вхідний JSON-запит під потрібну структуру на льоту на рівні проксі за допомогою правил `X-Extract-Map` (наприклад, мапінг `$.id=>order_id`) або каскадних маршрутів БД, щоб пристосувати його до цільового API.
   * Якщо кінцева ERP-система не працює, MirApi поміщає вебхук у чергу в Redis і надійно повторює спроби доставки протягом 24 годин.
 
 ---
@@ -86,6 +86,21 @@ curl -X POST https://proxy.mirapi.io/ \
 
 * **Статус відповіді:** `400 Bad Request`
 * **Тіло відповіді:** `"Error: Clear-text payment data detected. Please use tokenization (Stripe/Braintree tokens) instead of raw card numbers."`
+
+### 5. Конфігурація через параметри URL (Альтернатива заголовкам)
+Для клієнтів, які не дозволяють встановлювати власні HTTP-заголовки (наприклад, **вебхуки Shopify Admin**), будь-який заголовок конфігурації проксі можна передати безпосередньо через параметри запиту в URL.
+
+> [!IMPORTANT]
+> **Обов'язкове кодування URL (URL Encoding):** Будь-який URL, переданий всередині параметра запиту (наприклад, `target` або `callback`), має бути закодований (замініть `https://` на `https%3A%2F%2F` та `/` на `%2F`).
+
+```bash
+# Черга вебхуків та доставка суто за допомогою параметрів URL:
+curl -X POST "https://proxy.mirapi.io/v1/webhook?mirapi_key=YOUR_API_KEY&callback=https%3A%2F%2Fyour-app.com%2Fwebhooks&retries=5&delay=200ms" \
+  -H "Content-Type: application/json" \
+  -d '{"event": "order_created"}'
+```
+
+Для отримання детальнішої інформації про мапінг параметрів запиту та приклади див. [Посібник з конфігурації параметрів URL](documentation/api-reference/api-reference;query-params.mdx).
 
 ---
 
